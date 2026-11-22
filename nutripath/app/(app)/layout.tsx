@@ -1,12 +1,14 @@
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
+import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
+import { prisma } from '@/lib/prisma'
 import SignOutButton from './SignOutButton'
 
 /**
- * Authenticated shell layout — wraps all (app) routes.
- * Server-side session check: unauthenticated users are sent to /login.
- * Renders the global navbar and the "Not medical advice" footer.
+ * Authenticated shell layout — wraps all (app) routes except /onboarding.
+ * Server-side session check: unauthenticated → /login.
+ * No profile yet → /onboarding.
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = createClient()
@@ -16,6 +18,24 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   if (!session) {
     redirect('/login')
+  }
+
+  // Allow /onboarding through without the profile check (it creates the profile)
+  // This check only runs for the other app routes — Next.js runs this layout
+  // for all routes under (app) except those with their own layout.
+  // We detect onboarding by checking the cookie: if not set, verify in DB.
+  const cookieStore = cookies()
+  const hasProfileCookie = cookieStore.get('nutripath_has_profile')?.value === '1'
+
+  if (!hasProfileCookie) {
+    // Check DB — slightly slower but only happens once per session until cookie is set
+    const user = await prisma.user.findUnique({
+      where: { email: session.user.email! },
+      select: { profile: { select: { id: true } } },
+    })
+    if (!user?.profile) {
+      redirect('/onboarding')
+    }
   }
 
   return (
@@ -29,7 +49,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
           <nav className="hidden sm:flex items-center gap-5 text-sm text-gray-600">
             <Link href="/profile" className="hover:text-gray-900">Profile</Link>
-            <Link href="/goals" className="hover:text-gray-900">Goals</Link>
             <Link href="/log" className="hover:text-gray-900">Food Log</Link>
             <Link href="/foods" className="hover:text-gray-900">Foods</Link>
             <Link href="/plan" className="hover:text-gray-900">Meal Plan</Link>

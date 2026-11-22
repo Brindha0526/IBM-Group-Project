@@ -6,7 +6,7 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { createClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
-import { getFoodDetail } from '@/lib/usda'
+import { getFoodDetail, searchFoods } from '@/lib/usda'
 import { runSafetyRules } from '@/lib/safety'
 import type { FoodInput, ProfileInput } from '@/types/safety'
 
@@ -111,10 +111,23 @@ export async function POST(request: Request) {
 
   const { fdcId, foodName, servingG } = parsed.data
 
-  // 3. Fetch USDA detail
-  const detail = await getFoodDetail(fdcId)
+  // 3. Fetch USDA detail — seed data items have non-numeric fdcIds that USDA
+  //    can't look up directly, so fall back to a name-based search.
+  let detail = await getFoodDetail(fdcId)
 
-  // 4. 422 if food not found
+  if (!detail) {
+    // Seed data fallback: search by food name and use the first Foundation /
+    // SR Legacy result.
+    const results = await searchFoods(foodName)
+    const best =
+      results.find((r) => r.dataType === 'Foundation' || r.dataType === 'SR Legacy') ??
+      results[0]
+    if (best) {
+      detail = await getFoodDetail(best.fdcId)
+    }
+  }
+
+  // 4. 422 if food not found even after fallback
   if (!detail) {
     return NextResponse.json(
       { error: 'Food not found in USDA database' },

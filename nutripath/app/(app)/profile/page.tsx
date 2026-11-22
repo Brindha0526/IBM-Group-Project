@@ -1,43 +1,28 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+// app/(app)/profile/page.tsx
+// Profile view + edit page (post-onboarding).
+// Shows all saved profile fields and goals in collapsible sections.
+// Each section has an inline edit form. Changes save immediately via the APIs.
+// Uses the full ProfileWizard for a complete re-do if the user wants it.
+
+import { useState, useEffect, useCallback } from 'react'
 import TagInput from '@/components/TagInput'
+import { deriveGoals, suggestGoalsFromHistory } from '@/lib/goals'
+import type { NutrientTarget, SuggestedGoal } from '@/types/goals'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Path = 'BEFORE' | 'AFTER'
-
-type Allergen =
-  | 'milk'
-  | 'eggs'
-  | 'fish'
-  | 'crustacean shellfish'
-  | 'tree nuts'
-  | 'peanuts'
-  | 'wheat'
-  | 'soybeans'
-  | 'sesame'
-
-type CareTeamFlag =
-  | 'LOW_IRON'
-  | 'LOW_VITAMIN_D'
-  | 'LOW_B12'
-  | 'HIGH_CHOLESTEROL'
-  | 'HIGH_BLOOD_SUGAR'
-  | 'HIGH_BLOOD_PRESSURE'
-
-interface WizardState {
-  step: number
-  path: Path | null
-  budget: string
-  schedule: string
+interface ProfileData {
+  path: 'BEFORE' | 'AFTER'
+  budget?: string | null
+  schedule?: string | null
   cuisines: string[]
   religiousRules: string[]
   preferences: string[]
   allergens: string[]
   medications: string[]
-  medicalHistory: string
+  medicalHistory?: string | null
   careTeamFlags: string[]
   isPregnant: boolean
   hasKidneyDisease: boolean
@@ -46,9 +31,13 @@ interface WizardState {
   hideCalories: boolean
 }
 
+interface SavedGoal extends NutrientTarget {
+  id: string
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ALLERGENS: { value: Allergen; label: string }[] = [
+const ALLERGENS = [
   { value: 'milk', label: 'Milk' },
   { value: 'eggs', label: 'Eggs' },
   { value: 'fish', label: 'Fish' },
@@ -60,786 +49,661 @@ const ALLERGENS: { value: Allergen; label: string }[] = [
   { value: 'sesame', label: 'Sesame' },
 ]
 
-const CARE_TEAM_FLAGS: { value: CareTeamFlag; label: string }[] = [
-  { value: 'LOW_IRON', label: 'Your care team mentioned your iron levels' },
-  { value: 'LOW_VITAMIN_D', label: 'Your care team mentioned your vitamin D levels' },
-  { value: 'LOW_B12', label: 'Your care team mentioned your B12 levels' },
-  { value: 'HIGH_CHOLESTEROL', label: 'Your care team mentioned your cholesterol' },
-  { value: 'HIGH_BLOOD_SUGAR', label: 'Your care team mentioned your blood sugar' },
-  { value: 'HIGH_BLOOD_PRESSURE', label: 'Your care team mentioned your blood pressure' },
+const CARE_TEAM_FLAGS = [
+  { value: 'LOW_IRON', label: 'Iron levels' },
+  { value: 'LOW_VITAMIN_D', label: 'Vitamin D levels' },
+  { value: 'LOW_B12', label: 'B12 levels' },
+  { value: 'HIGH_CHOLESTEROL', label: 'Cholesterol' },
+  { value: 'HIGH_BLOOD_SUGAR', label: 'Blood sugar' },
+  { value: 'HIGH_BLOOD_PRESSURE', label: 'Blood pressure' },
 ]
 
-const TOTAL_STEPS = 6
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function goalKey(g: NutrientTarget) { return g.nutrient.toLowerCase() }
+
+function targetRange(goal: NutrientTarget): string {
+  if (goal.targetMin !== undefined && goal.targetMax !== undefined) return `${goal.targetMin}–${goal.targetMax} ${goal.unit}`
+  if (goal.targetMin !== undefined) return `≥ ${goal.targetMin} ${goal.unit}`
+  if (goal.targetMax !== undefined) return `≤ ${goal.targetMax} ${goal.unit}`
+  return goal.unit
+}
+
+function sourceBadge(source: NutrientTarget['source']) {
+  const map: Record<string, string> = {
+    GUIDELINES: 'bg-blue-100 text-blue-800',
+    CARE_TEAM: 'bg-purple-100 text-purple-800',
+    USER_DEFINED: 'bg-green-100 text-green-800',
+    CURATED: 'bg-amber-100 text-amber-800',
+  }
+  const labels: Record<string, string> = {
+    GUIDELINES: 'Guidelines',
+    CARE_TEAM: 'Care team',
+    USER_DEFINED: 'Your goal',
+    CURATED: 'Suggested',
+  }
+  return { cls: map[source] ?? 'bg-gray-100 text-gray-700', label: labels[source] ?? source }
+}
 
 function toggleItem<T>(arr: T[], item: T): T[] {
   return arr.includes(item) ? arr.filter((x) => x !== item) : [...arr, item]
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── EditSection wrapper ──────────────────────────────────────────────────────
 
-function StepIndicator({ step }: { step: number }) {
-  return (
-    <p className="mb-6 text-sm font-medium text-gray-500">
-      Step {step} of {TOTAL_STEPS}
-    </p>
-  )
-}
-
-function NavButtons({
-  step,
-  onBack,
-  onContinue,
-  continueLabel,
-  continueDisabled,
-  loading,
-}: {
-  step: number
-  onBack: () => void
-  onContinue: () => void
-  continueLabel?: string
-  continueDisabled?: boolean
-  loading?: boolean
-}) {
-  return (
-    <div className="mt-8 flex items-center justify-between">
-      {step > 1 ? (
-        <button
-          type="button"
-          onClick={onBack}
-          className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-green-500"
-        >
-          Back
-        </button>
-      ) : (
-        <span />
-      )}
-      <button
-        type="button"
-        onClick={onContinue}
-        disabled={continueDisabled || loading}
-        className="rounded-md bg-green-600 px-5 py-2 text-sm font-semibold text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-40"
-      >
-        {loading ? 'Saving…' : (continueLabel ?? 'Continue')}
-      </button>
-    </div>
-  )
-}
-
-// ─── Step 1: Path selection ───────────────────────────────────────────────────
-
-function Step1({
-  path,
-  onSelect,
-}: {
-  path: Path | null
-  onSelect: (p: Path) => void
-}) {
-  return (
-    <div>
-      <StepIndicator step={1} />
-      <h1 className="text-2xl font-bold text-gray-900">Where are you in your journey?</h1>
-      <p className="mt-2 text-gray-500">Choose the option that best describes you right now.</p>
-
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
-        {/* BEFORE card */}
-        <button
-          type="button"
-          onClick={() => onSelect('BEFORE')}
-          className={`rounded-xl border-2 p-6 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 ${
-            path === 'BEFORE'
-              ? 'border-green-500 bg-green-50'
-              : 'border-gray-200 hover:border-green-300'
-          }`}
-        >
-          <div className="text-3xl">🌱</div>
-          <h2 className="mt-3 text-lg font-semibold text-gray-900">Before my visit</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            I want to build healthy habits and find a dietitian
-          </p>
-        </button>
-
-        {/* AFTER card */}
-        <button
-          type="button"
-          onClick={() => onSelect('AFTER')}
-          className={`rounded-xl border-2 p-6 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 ${
-            path === 'AFTER'
-              ? 'border-green-500 bg-green-50'
-              : 'border-gray-200 hover:border-green-300'
-          }`}
-        >
-          <div className="text-3xl">📋</div>
-          <h2 className="mt-3 text-lg font-semibold text-gray-900">After my visit</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            My care team gave me specific guidance to follow
-          </p>
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ─── Step 2a: Lifestyle (BEFORE) ──────────────────────────────────────────────
-
-function Step2Before({
-  state,
-  update,
-  onBack,
-  onContinue,
-}: {
-  state: WizardState
-  update: (patch: Partial<WizardState>) => void
-  onBack: () => void
-  onContinue: () => void
-}) {
-  return (
-    <div>
-      <StepIndicator step={2} />
-      <h1 className="text-2xl font-bold text-gray-900">Your lifestyle</h1>
-      <p className="mt-2 text-gray-500">Help us tailor food ideas that fit your everyday life.</p>
-
-      <div className="mt-6 space-y-6">
-        {/* Budget */}
-        <fieldset>
-          <legend className="text-sm font-medium text-gray-700">
-            What&apos;s your food budget like?
-          </legend>
-          <div className="mt-2 space-y-2">
-            {[
-              { value: 'flexible', label: 'Flexible' },
-              { value: 'moderate', label: 'Moderate' },
-              { value: 'budget_conscious', label: 'Budget-conscious' },
-            ].map(({ value, label }) => (
-              <label key={value} className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="radio"
-                  name="budget"
-                  value={value}
-                  checked={state.budget === value}
-                  onChange={() => update({ budget: value })}
-                  className="h-4 w-4 border-gray-300 text-green-600 focus:ring-green-500"
-                />
-                <span className="text-sm text-gray-700">{label}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        {/* Schedule */}
-        <fieldset>
-          <legend className="text-sm font-medium text-gray-700">
-            How much time do you usually have to cook?
-          </legend>
-          <div className="mt-2 space-y-2">
-            {[
-              { value: 'plenty', label: 'Plenty of time to cook' },
-              { value: 'moderate', label: 'Moderate' },
-              { value: 'very_busy', label: 'Very busy' },
-            ].map(({ value, label }) => (
-              <label key={value} className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="radio"
-                  name="schedule"
-                  value={value}
-                  checked={state.schedule === value}
-                  onChange={() => update({ schedule: value })}
-                  className="h-4 w-4 border-gray-300 text-green-600 focus:ring-green-500"
-                />
-                <span className="text-sm text-gray-700">{label}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        {/* Cuisines */}
-        <TagInput
-          label="What cuisines or cultural foods do you enjoy?"
-          tags={state.cuisines}
-          onChange={(cuisines) => update({ cuisines })}
-          placeholder="e.g. Caribbean, Korean, Ethiopian…"
-        />
-
-        {/* Religious / ethical rules */}
-        <TagInput
-          label="Any religious or ethical food guidelines?"
-          tags={state.religiousRules}
-          onChange={(religiousRules) => update({ religiousRules })}
-          placeholder="e.g. halal, kosher, vegan…"
-        />
-
-        {/* Other preferences */}
-        <TagInput
-          label="Any other food preferences?"
-          tags={state.preferences}
-          onChange={(preferences) => update({ preferences })}
-          placeholder="e.g. no mushrooms, prefer spicy…"
-        />
-      </div>
-
-      <NavButtons step={2} onBack={onBack} onContinue={onContinue} />
-    </div>
-  )
-}
-
-// ─── Step 2b: Care-team flags (AFTER) ────────────────────────────────────────
-
-function Step2After({
-  state,
-  update,
-  onBack,
-  onContinue,
-}: {
-  state: WizardState
-  update: (patch: Partial<WizardState>) => void
-  onBack: () => void
-  onContinue: () => void
-}) {
-  function toggle(flag: string) {
-    update({ careTeamFlags: toggleItem(state.careTeamFlags, flag) })
-  }
-
-  return (
-    <div>
-      <StepIndicator step={2} />
-      <h1 className="text-2xl font-bold text-gray-900">What did your care team mention?</h1>
-      <p className="mt-2 text-gray-500">
-        Select everything that applies. You can always update this later.
-      </p>
-
-      <div className="mt-6 space-y-3">
-        {CARE_TEAM_FLAGS.map(({ value, label }) => (
-          <label
-            key={value}
-            className="flex items-start gap-3 rounded-lg border border-gray-200 p-4 cursor-pointer hover:bg-gray-50"
-          >
-            <input
-              type="checkbox"
-              checked={state.careTeamFlags.includes(value)}
-              onChange={() => toggle(value)}
-              className="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
-            />
-            <span className="text-sm text-gray-700">{label}</span>
-          </label>
-        ))}
-      </div>
-
-      <p className="mt-4 text-xs text-gray-400">
-        Not medical advice. We use this to tailor your food suggestions.
-      </p>
-
-      <NavButtons step={2} onBack={onBack} onContinue={onContinue} />
-    </div>
-  )
-}
-
-// ─── Step 3: Allergens ────────────────────────────────────────────────────────
-
-function Step3({
-  state,
-  update,
-  onBack,
-  onContinue,
-}: {
-  state: WizardState
-  update: (patch: Partial<WizardState>) => void
-  onBack: () => void
-  onContinue: () => void
-}) {
-  function toggle(allergen: string) {
-    update({ allergens: toggleItem(state.allergens, allergen) })
-  }
-
-  return (
-    <div>
-      <StepIndicator step={3} />
-      <h1 className="text-2xl font-bold text-gray-900">Do you have any food allergies?</h1>
-
-      <div className="mt-6 space-y-3">
-        {ALLERGENS.map(({ value, label }) => (
-          <label
-            key={value}
-            className="flex items-center gap-3 rounded-lg border border-gray-200 p-4 cursor-pointer hover:bg-gray-50"
-          >
-            <input
-              type="checkbox"
-              checked={state.allergens.includes(value)}
-              onChange={() => toggle(value)}
-              className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
-            />
-            <span className="text-sm text-gray-700">{label}</span>
-          </label>
-        ))}
-      </div>
-
-      <p className="mt-4 text-xs text-gray-400">
-        We&apos;ll make sure none of your plans or suggestions include these.
-      </p>
-
-      <NavButtons step={3} onBack={onBack} onContinue={onContinue} />
-    </div>
-  )
-}
-
-// ─── Step 4: Medications ──────────────────────────────────────────────────────
-
-function Step4({
-  state,
-  update,
-  onBack,
-  onContinue,
-}: {
-  state: WizardState
-  update: (patch: Partial<WizardState>) => void
-  onBack: () => void
-  onContinue: () => void
-}) {
-  return (
-    <div>
-      <StepIndicator step={4} />
-      <h1 className="text-2xl font-bold text-gray-900">Are you taking any medications?</h1>
-      <p className="mt-2 text-gray-500">
-        This helps us flag potential food interactions. We&apos;ll always tell you to check with
-        your pharmacist.
-      </p>
-
-      <div className="mt-6 space-y-6">
-        <div>
-          <TagInput
-            label="Medications"
-            tags={state.medications}
-            onChange={(medications) => update({ medications })}
-            placeholder="Type a medication name and press Enter…"
-          />
-          <p className="mt-2 text-xs text-gray-400">
-            We use this only to flag possible food interactions. Always check with your pharmacist.
-          </p>
-        </div>
-
-        <div>
-          <label
-            htmlFor="medicalHistory"
-            className="block text-sm font-medium text-gray-700"
-          >
-            Medical history{' '}
-            <span className="font-normal text-gray-400">(optional)</span>
-          </label>
-          <p className="mt-1 text-xs text-gray-500">
-            Describe anything relevant in your own words — we&apos;ll use this to suggest helpful
-            goals on the next screen.
-          </p>
-          <textarea
-            id="medicalHistory"
-            rows={4}
-            value={state.medicalHistory}
-            onChange={(e) => update({ medicalHistory: e.target.value })}
-            placeholder="e.g. 'I have anaemia and was recently told my vitamin D is low'"
-            className="mt-2 w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
-          />
-        </div>
-      </div>
-
-      <NavButtons step={4} onBack={onBack} onContinue={onContinue} />
-    </div>
-  )
-}
-
-// ─── Step 5: Sensitive flags ──────────────────────────────────────────────────
-
-const GENERAL_SUGGESTIONS_NOTE =
-  "We'll show you general suggestions and recommend speaking with your care team."
-
-function SensitiveQuestion({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string
-  checked: boolean
-  onChange: (val: boolean) => void
-}) {
-  return (
-    <div className="rounded-lg border border-gray-200 p-4">
-      <div className="flex items-center justify-between gap-4">
-        <span className="text-sm text-gray-700">{label}</span>
-        <div className="flex gap-3">
-          <label className="flex items-center gap-1 cursor-pointer">
-            <input
-              type="radio"
-              checked={checked === true}
-              onChange={() => onChange(true)}
-              name={label}
-              className="h-4 w-4 border-gray-300 text-green-600 focus:ring-green-500"
-            />
-            <span className="text-sm text-gray-700">Yes</span>
-          </label>
-          <label className="flex items-center gap-1 cursor-pointer">
-            <input
-              type="radio"
-              checked={checked === false}
-              onChange={() => onChange(false)}
-              name={label}
-              className="h-4 w-4 border-gray-300 text-green-600 focus:ring-green-500"
-            />
-            <span className="text-sm text-gray-700">No</span>
-          </label>
-        </div>
-      </div>
-      {checked && (
-        <p className="mt-2 text-xs text-green-700 bg-green-50 rounded px-3 py-2">
-          {GENERAL_SUGGESTIONS_NOTE}
-        </p>
-      )}
-    </div>
-  )
-}
-
-function Step5({
-  state,
-  update,
-  onBack,
-  onContinue,
-}: {
-  state: WizardState
-  update: (patch: Partial<WizardState>) => void
-  onBack: () => void
-  onContinue: () => void
-}) {
-  return (
-    <div>
-      <StepIndicator step={5} />
-      <h1 className="text-2xl font-bold text-gray-900">A few more details to keep you safe</h1>
-      <p className="mt-2 text-gray-500">
-        Your answers help us give you suggestions that are right for your situation.
-      </p>
-
-      <div className="mt-6 space-y-4">
-        <SensitiveQuestion
-          label="Are you currently pregnant or breastfeeding?"
-          checked={state.isPregnant}
-          onChange={(val) => update({ isPregnant: val })}
-        />
-        <SensitiveQuestion
-          label="Do you have kidney disease?"
-          checked={state.hasKidneyDisease}
-          onChange={(val) => update({ hasKidneyDisease: val })}
-        />
-        <SensitiveQuestion
-          label="Do you take insulin?"
-          checked={state.takesInsulin}
-          onChange={(val) => update({ takesInsulin: val })}
-        />
-        <SensitiveQuestion
-          label="Do you have a history of disordered eating?"
-          checked={state.hasEdHistory}
-          onChange={(val) => update({ hasEdHistory: val })}
-        />
-      </div>
-
-      {/* Calorie-hide toggle */}
-      <div className="mt-6 rounded-lg border border-gray-200 p-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-sm font-medium text-gray-700">Hide calorie numbers</p>
-            <p className="mt-1 text-xs text-gray-500">
-              Some people find it more helpful to focus on nutrients rather than calories.
-            </p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={state.hideCalories}
-            onClick={() => update({ hideCalories: !state.hideCalories })}
-            className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
-              state.hideCalories ? 'bg-green-600' : 'bg-gray-200'
-            }`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                state.hideCalories ? 'translate-x-5' : 'translate-x-0'
-              }`}
-            />
-          </button>
-        </div>
-      </div>
-
-      <NavButtons step={5} onBack={onBack} onContinue={onContinue} />
-    </div>
-  )
-}
-
-// ─── Step 6: Confirmation ─────────────────────────────────────────────────────
-
-function Step6({
-  state,
-  onBack,
+function EditSection({
+  title,
+  children,
+  editing,
+  onEdit,
+  onCancel,
   onSave,
-  loading,
+  saving,
 }: {
-  state: WizardState
-  onBack: () => void
+  title: string
+  children: React.ReactNode
+  editing: boolean
+  onEdit: () => void
+  onCancel: () => void
   onSave: () => void
-  loading: boolean
+  saving?: boolean
 }) {
-  const pathLabel = state.path === 'BEFORE' ? 'Before my visit' : 'After my visit'
-
   return (
-    <div>
-      <StepIndicator step={6} />
-      <h1 className="text-2xl font-bold text-gray-900">Review your profile</h1>
-      <p className="mt-2 text-gray-500">
-        Take a moment to check everything looks right before we save.
-      </p>
-
-      <dl className="mt-6 divide-y divide-gray-100 rounded-xl border border-gray-200 overflow-hidden">
-        <SummaryRow label="Journey" value={pathLabel} />
-
-        {state.path === 'BEFORE' && (
-          <>
-            {state.budget && (
-              <SummaryRow
-                label="Budget"
-                value={
-                  state.budget === 'flexible'
-                    ? 'Flexible'
-                    : state.budget === 'moderate'
-                    ? 'Moderate'
-                    : 'Budget-conscious'
-                }
-              />
-            )}
-            {state.schedule && (
-              <SummaryRow
-                label="Schedule"
-                value={
-                  state.schedule === 'plenty'
-                    ? 'Plenty of time to cook'
-                    : state.schedule === 'moderate'
-                    ? 'Moderate'
-                    : 'Very busy'
-                }
-              />
-            )}
-            {state.cuisines.length > 0 && (
-              <SummaryRow label="Cuisines" value={state.cuisines.join(', ')} />
-            )}
-            {state.religiousRules.length > 0 && (
-              <SummaryRow label="Food guidelines" value={state.religiousRules.join(', ')} />
-            )}
-            {state.preferences.length > 0 && (
-              <SummaryRow label="Preferences" value={state.preferences.join(', ')} />
-            )}
-          </>
+    <section className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-4 bg-gray-50 border-b border-gray-100">
+        <h2 className="text-sm font-semibold text-gray-900">{title}</h2>
+        {!editing ? (
+          <button type="button" onClick={onEdit} className="text-xs text-blue-600 hover:text-blue-800 font-medium">
+            Edit
+          </button>
+        ) : (
+          <div className="flex gap-3">
+            <button type="button" onClick={onCancel} className="text-xs text-gray-500 hover:text-gray-700">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={saving}
+              className="text-xs font-semibold text-white bg-green-600 hover:bg-green-700 px-3 py-1 rounded disabled:opacity-40"
+            >
+              {saving ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
         )}
-
-        {state.path === 'AFTER' && state.careTeamFlags.length > 0 && (
-          <SummaryRow
-            label="Care-team mentions"
-            value={`${state.careTeamFlags.length} item${state.careTeamFlags.length !== 1 ? 's' : ''} selected`}
-          />
-        )}
-
-        {state.allergens.length > 0 && (
-          <SummaryRow
-            label="Allergens"
-            value={state.allergens
-              .map((a) => a.charAt(0).toUpperCase() + a.slice(1))
-              .join(', ')}
-          />
-        )}
-
-        <SummaryRow
-          label="Medications"
-          value={
-            state.medications.length > 0
-              ? `${state.medications.length} medication${state.medications.length !== 1 ? 's' : ''} listed`
-              : 'None listed'
-          }
-        />
-
-        <SummaryRow
-          label="Calorie display"
-          value={state.hideCalories ? 'Hidden' : 'Shown'}
-        />
-      </dl>
-
-      {/* Not medical advice notice */}
-      <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4">
-        <p className="text-sm font-semibold text-amber-800">Not medical advice</p>
-        <p className="mt-1 text-sm text-amber-700">
-          This app supports healthy eating — it does not diagnose conditions or replace your
-          care team.
-        </p>
       </div>
-
-      <NavButtons
-        step={6}
-        onBack={onBack}
-        onContinue={onSave}
-        continueLabel="Save my profile"
-        loading={loading}
-      />
-    </div>
+      <div className="px-5 py-4">{children}</div>
+    </section>
   )
 }
 
-function SummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-4 px-4 py-3 text-sm">
-      <dt className="font-medium text-gray-500 shrink-0">{label}</dt>
-      <dd className="text-gray-900 text-right">{value}</dd>
-    </div>
-  )
-}
-
-// ─── Main wizard ──────────────────────────────────────────────────────────────
-
-const INITIAL_STATE: WizardState = {
-  step: 1,
-  path: null,
-  budget: '',
-  schedule: '',
-  cuisines: [],
-  religiousRules: [],
-  preferences: [],
-  allergens: [],
-  medications: [],
-  medicalHistory: '',
-  careTeamFlags: [],
-  isPregnant: false,
-  hasKidneyDisease: false,
-  takesInsulin: false,
-  hasEdHistory: false,
-  hideCalories: false,
-}
+// ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function ProfilePage() {
-  const router = useRouter()
-  const [state, setState] = useState<WizardState>(INITIAL_STATE)
-  const [loading, setLoading] = useState(false)
+  const [profile, setProfile] = useState<ProfileData | null>(null)
+  const [goals, setGoals] = useState<SavedGoal[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // ── Which sections are in edit mode ──────────────────────────────────────────
+  const [editingJourney, setEditingJourney] = useState(false)
+  const [editingLifestyle, setEditingLifestyle] = useState(false)
+  const [editingAllergens, setEditingAllergens] = useState(false)
+  const [editingMedications, setEditingMedications] = useState(false)
+  const [editingSensitive, setEditingSensitive] = useState(false)
+  const [editingGoals, setEditingGoals] = useState(false)
+
+  // ── Draft state (per section) ─────────────────────────────────────────────────
+  const [draft, setDraft] = useState<ProfileData | null>(null)
+  const [goalsDraft, setGoalsDraft] = useState<NutrientTarget[]>([])
+  const [savingSection, setSavingSection] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // Pre-fill from existing profile on mount
-  useEffect(() => {
-    fetch('/api/profile/me')
-      .then((r) => r.json())
-      .then(({ profile }) => {
-        if (!profile) return
-        setState((prev) => ({
-          ...prev,
-          path: profile.path ?? null,
-          budget: profile.budget ?? '',
-          schedule: profile.schedule ?? '',
-          cuisines: profile.cuisines ?? [],
-          religiousRules: profile.religiousRules ?? [],
-          preferences: profile.preferences ?? [],
-          allergens: profile.allergens ?? [],
-          medications: profile.medications ?? [],
-          medicalHistory: profile.medicalHistory ?? '',
-          careTeamFlags: profile.careTeamFlags ?? [],
-          isPregnant: profile.isPregnant ?? false,
-          hasKidneyDisease: profile.hasKidneyDisease ?? false,
-          takesInsulin: profile.takesInsulin ?? false,
-          hasEdHistory: profile.hasEdHistory ?? false,
-          hideCalories: profile.hideCalories ?? false,
-        }))
-      })
-      .catch(() => {
-        // Not authenticated or no profile yet — stay on step 1 with blank state
-      })
+  // Goals editor state
+  const [goalInput, setGoalInput] = useState('')
+  const [goalInputPreview, setGoalInputPreview] = useState<NutrientTarget | null>(null)
+  const [suggestText, setSuggestText] = useState('')
+  const [suggestions, setSuggestions] = useState<SuggestedGoal[]>([])
+  const [suggestChecked, setSuggestChecked] = useState<Set<string>>(new Set())
+  const [suggestShown, setSuggestShown] = useState(false)
+
+  // ── Load data ─────────────────────────────────────────────────────────────────
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [pRes, gRes] = await Promise.all([fetch('/api/profile/me'), fetch('/api/goals')])
+      if (pRes.ok) {
+        const { profile: p } = await pRes.json()
+        setProfile(p)
+        setDraft(p)
+      }
+      if (gRes.ok) {
+        const { goals: g } = await gRes.json()
+        setGoals(g ?? [])
+        setGoalsDraft(g ?? [])
+      }
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  function update(patch: Partial<WizardState>) {
-    setState((prev) => ({ ...prev, ...patch }))
-  }
+  useEffect(() => { load() }, [load])
 
-  function goBack() {
-    setState((prev) => ({ ...prev, step: prev.step - 1 }))
-  }
+  // Live preview for goal input
+  useEffect(() => {
+    if (!goalInput.trim()) { setGoalInputPreview(null); return }
+    const hits = suggestGoalsFromHistory(goalInput)
+    setGoalInputPreview(hits.length > 0 ? { ...hits[0], source: 'USER_DEFINED' } : null)
+  }, [goalInput])
 
-  function goNext() {
-    setState((prev) => ({ ...prev, step: prev.step + 1 }))
-  }
+  if (loading) return <div className="p-6 text-sm text-gray-500">Loading your profile…</div>
+  if (!profile || !draft) return <div className="p-6 text-sm text-gray-500">No profile found.</div>
 
-  function selectPath(p: Path) {
-    setState((prev) => ({ ...prev, path: p, step: 2 }))
-  }
+  // ── Save helpers ──────────────────────────────────────────────────────────────
 
-  async function handleSave() {
-    if (!state.path) return
-    setLoading(true)
+  async function saveProfile(section: string, patch: Partial<ProfileData>) {
+    setSavingSection(section)
     setSaveError(null)
+    const updated = { ...profile, ...patch }
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          path: state.path,
-          budget: state.budget || undefined,
-          schedule: state.schedule || undefined,
-          cuisines: state.cuisines,
-          religiousRules: state.religiousRules,
-          preferences: state.preferences,
-          allergens: state.allergens,
-          medications: state.medications,
-          medicalHistory: state.medicalHistory || undefined,
-          careTeamFlags: state.careTeamFlags,
-          isPregnant: state.isPregnant,
-          hasKidneyDisease: state.hasKidneyDisease,
-          takesInsulin: state.takesInsulin,
-          hasEdHistory: state.hasEdHistory,
-          hideCalories: state.hideCalories,
-        }),
+        body: JSON.stringify(updated),
       })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        setSaveError(body.error ?? 'Something went wrong. Please try again.')
-        return
-      }
-      router.push('/goals')
+      if (!res.ok) throw new Error('Failed to save')
+      setProfile(updated)
+      setDraft(updated)
     } catch {
-      setSaveError('Something went wrong. Please try again.')
+      setSaveError('Could not save. Please try again.')
     } finally {
-      setLoading(false)
+      setSavingSection(null)
     }
   }
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  async function saveGoals(newGoals: NutrientTarget[]) {
+    setSavingSection('goals')
+    setSaveError(null)
+    try {
+      const res = await fetch('/api/goals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goals: newGoals }),
+      })
+      if (!res.ok) throw new Error('Failed to save goals')
+      await load()
+    } catch {
+      setSaveError('Could not save goals. Please try again.')
+    } finally {
+      setSavingSection(null)
+    }
+  }
+
+  // ── Draft helpers ─────────────────────────────────────────────────────────────
+
+  function updateDraft(patch: Partial<ProfileData>) {
+    setDraft((prev) => prev ? { ...prev, ...patch } : prev)
+  }
+
+  function cancelSection(setter: (v: boolean) => void) {
+    setDraft(profile)
+    setSaveError(null)
+    setter(false)
+  }
+
+  // ── Goals draft helpers ───────────────────────────────────────────────────────
+
+  function addGoalToDraft(goal: NutrientTarget) {
+    setGoalsDraft((prev) => {
+      const key = goalKey(goal)
+      return prev.some((g) => goalKey(g) === key) ? prev : [...prev, goal]
+    })
+  }
+
+  function removeGoalFromDraft(key: string) {
+    setGoalsDraft((prev) => prev.filter((g) => goalKey(g) !== key))
+  }
+
+  function handleAddGoalInput() {
+    if (!goalInput.trim()) return
+    addGoalToDraft(
+      goalInputPreview
+        ? { ...goalInputPreview, source: 'USER_DEFINED' }
+        : { nutrient: goalInput.trim().toLowerCase(), label: goalInput.trim(), unit: '', source: 'USER_DEFINED' }
+    )
+    setGoalInput('')
+    setGoalInputPreview(null)
+  }
+
+  function handleSuggestGoals() {
+    const s = suggestGoalsFromHistory(suggestText)
+    setSuggestions(s)
+    setSuggestChecked(new Set(s.map((g) => goalKey(g))))
+    setSuggestShown(true)
+  }
+
+  function handleAddSuggested() {
+    suggestions.filter((g) => suggestChecked.has(goalKey(g))).forEach(addGoalToDraft)
+    setSuggestShown(false)
+    setSuggestions([])
+    setSuggestChecked(new Set())
+  }
+
+  // ── Care-team derived goals (AFTER path) ──────────────────────────────────────
+  const careTeamGoals = profile.path === 'AFTER'
+    ? deriveGoals({ path: 'AFTER', careTeamFlags: profile.careTeamFlags }).filter((g) => g.source === 'CARE_TEAM')
+    : []
+
+  // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="mx-auto max-w-xl px-4 py-10">
-      {state.step === 1 && (
-        <Step1 path={state.path} onSelect={selectPath} />
-      )}
-
-      {state.step === 2 && state.path === 'BEFORE' && (
-        <Step2Before state={state} update={update} onBack={goBack} onContinue={goNext} />
-      )}
-
-      {state.step === 2 && state.path === 'AFTER' && (
-        <Step2After state={state} update={update} onBack={goBack} onContinue={goNext} />
-      )}
-
-      {state.step === 3 && (
-        <Step3 state={state} update={update} onBack={goBack} onContinue={goNext} />
-      )}
-
-      {state.step === 4 && (
-        <Step4 state={state} update={update} onBack={goBack} onContinue={goNext} />
-      )}
-
-      {state.step === 5 && (
-        <Step5 state={state} update={update} onBack={goBack} onContinue={goNext} />
-      )}
-
-      {state.step === 6 && (
-        <Step6 state={state} onBack={goBack} onSave={handleSave} loading={loading} />
-      )}
+    <div className="max-w-2xl mx-auto space-y-5">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Your Profile</h1>
+        <p className="mt-1 text-sm text-gray-500">
+          Your preferences, allergens, and goals — edit any section at any time.
+        </p>
+      </div>
 
       {saveError && (
-        <p className="mt-4 text-sm text-red-600">{saveError}</p>
+        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-3">
+          {saveError}
+        </div>
       )}
+
+      {/* ── Journey ────────────────────────────────────────────────────────── */}
+      <EditSection
+        title="Your journey"
+        editing={editingJourney}
+        onEdit={() => setEditingJourney(true)}
+        onCancel={() => cancelSection(setEditingJourney)}
+        onSave={async () => {
+          await saveProfile('journey', { path: draft!.path })
+          setEditingJourney(false)
+        }}
+        saving={savingSection === 'journey'}
+      >
+        {!editingJourney ? (
+          <p className="text-sm text-gray-700">
+            {profile.path === 'BEFORE' ? '🌱 Before my visit' : '📋 After my visit'}
+          </p>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {([
+              { p: 'BEFORE' as const, icon: '🌱', label: 'Before my visit' },
+              { p: 'AFTER' as const, icon: '📋', label: 'After my visit' },
+            ]).map(({ p, icon, label }) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => updateDraft({ path: p })}
+                className={`rounded-xl border-2 p-4 text-left text-sm transition-colors ${draft?.path === p ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-green-300'}`}
+              >
+                <span className="text-xl">{icon}</span>
+                <p className="mt-1 font-medium text-gray-900">{label}</p>
+              </button>
+            ))}
+          </div>
+        )}
+      </EditSection>
+
+      {/* ── Lifestyle ──────────────────────────────────────────────────────── */}
+      <EditSection
+        title="Lifestyle"
+        editing={editingLifestyle}
+        onEdit={() => setEditingLifestyle(true)}
+        onCancel={() => cancelSection(setEditingLifestyle)}
+        onSave={async () => {
+          await saveProfile('lifestyle', {
+            budget: draft!.budget ?? undefined,
+            schedule: draft!.schedule ?? undefined,
+            cuisines: draft!.cuisines,
+            religiousRules: draft!.religiousRules,
+            preferences: draft!.preferences,
+          })
+          setEditingLifestyle(false)
+        }}
+        saving={savingSection === 'lifestyle'}
+      >
+        {!editingLifestyle ? (
+          <dl className="space-y-2 text-sm">
+            {profile.budget && <Row label="Budget" value={profile.budget.replace('_', ' ')} />}
+            {profile.schedule && <Row label="Schedule" value={profile.schedule.replace('_', ' ')} />}
+            {profile.cuisines.length > 0 && <Row label="Cuisines" value={profile.cuisines.join(', ')} />}
+            {profile.religiousRules.length > 0 && <Row label="Food guidelines" value={profile.religiousRules.join(', ')} />}
+            {profile.preferences.length > 0 && <Row label="Other preferences" value={profile.preferences.join(', ')} />}
+            {!profile.budget && !profile.cuisines.length && <p className="text-gray-400">No lifestyle info saved.</p>}
+          </dl>
+        ) : (
+          <div className="space-y-5">
+            <fieldset>
+              <legend className="text-xs font-medium text-gray-600 mb-2">Budget</legend>
+              {[{ value: 'flexible', label: 'Flexible' }, { value: 'moderate', label: 'Moderate' }, { value: 'budget_conscious', label: 'Budget-conscious' }].map(({ value, label }) => (
+                <label key={value} className="flex items-center gap-2 mb-1 cursor-pointer">
+                  <input type="radio" name="budget" value={value} checked={draft?.budget === value} onChange={() => updateDraft({ budget: value })} className="h-4 w-4 text-green-600" />
+                  <span className="text-sm text-gray-700">{label}</span>
+                </label>
+              ))}
+            </fieldset>
+            <fieldset>
+              <legend className="text-xs font-medium text-gray-600 mb-2">Time to cook</legend>
+              {[{ value: 'plenty', label: 'Plenty of time' }, { value: 'moderate', label: 'Moderate' }, { value: 'very_busy', label: 'Very busy' }].map(({ value, label }) => (
+                <label key={value} className="flex items-center gap-2 mb-1 cursor-pointer">
+                  <input type="radio" name="schedule" value={value} checked={draft?.schedule === value} onChange={() => updateDraft({ schedule: value })} className="h-4 w-4 text-green-600" />
+                  <span className="text-sm text-gray-700">{label}</span>
+                </label>
+              ))}
+            </fieldset>
+            <TagInput label="Cuisines" tags={draft?.cuisines ?? []} onChange={(v) => updateDraft({ cuisines: v })} placeholder="e.g. Caribbean, Korean…" />
+            <TagInput label="Food guidelines" tags={draft?.religiousRules ?? []} onChange={(v) => updateDraft({ religiousRules: v })} placeholder="e.g. halal, kosher, vegan…" />
+            <TagInput label="Other preferences" tags={draft?.preferences ?? []} onChange={(v) => updateDraft({ preferences: v })} placeholder="e.g. no mushrooms…" />
+          </div>
+        )}
+      </EditSection>
+
+      {/* ── Allergens ──────────────────────────────────────────────────────── */}
+      <EditSection
+        title="Allergies"
+        editing={editingAllergens}
+        onEdit={() => setEditingAllergens(true)}
+        onCancel={() => cancelSection(setEditingAllergens)}
+        onSave={async () => {
+          await saveProfile('allergens', { allergens: draft!.allergens })
+          setEditingAllergens(false)
+        }}
+        saving={savingSection === 'allergens'}
+      >
+        {!editingAllergens ? (
+          profile.allergens.length > 0
+            ? <p className="text-sm text-gray-700 capitalize">{profile.allergens.join(', ')}</p>
+            : <p className="text-sm text-gray-400">No allergens selected.</p>
+        ) : (
+          <div className="space-y-2">
+            {ALLERGENS.map(({ value, label }) => (
+              <label key={value} className="flex items-center gap-3 rounded-lg border border-gray-200 p-3 cursor-pointer hover:bg-gray-50">
+                <input type="checkbox" checked={draft?.allergens.includes(value) ?? false} onChange={() => updateDraft({ allergens: toggleItem(draft?.allergens ?? [], value) })} className="h-4 w-4 rounded border-gray-300 text-green-600" />
+                <span className="text-sm text-gray-700">{label}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </EditSection>
+
+      {/* ── Medications ────────────────────────────────────────────────────── */}
+      <EditSection
+        title="Medications & medical history"
+        editing={editingMedications}
+        onEdit={() => setEditingMedications(true)}
+        onCancel={() => cancelSection(setEditingMedications)}
+        onSave={async () => {
+          await saveProfile('medications', { medications: draft!.medications, medicalHistory: draft!.medicalHistory })
+          setEditingMedications(false)
+        }}
+        saving={savingSection === 'medications'}
+      >
+        {!editingMedications ? (
+          <dl className="space-y-2 text-sm">
+            <Row label="Medications" value={profile.medications.length > 0 ? profile.medications.join(', ') : 'None listed'} />
+            {profile.medicalHistory && <Row label="Medical history" value={profile.medicalHistory} />}
+          </dl>
+        ) : (
+          <div className="space-y-4">
+            <TagInput label="Medications" tags={draft?.medications ?? []} onChange={(v) => updateDraft({ medications: v })} placeholder="Type a medication and press Enter…" />
+            <div>
+              <label htmlFor="medHistory" className="block text-xs font-medium text-gray-600 mb-1">Medical history <span className="text-gray-400 font-normal">(optional)</span></label>
+              <textarea
+                id="medHistory"
+                rows={3}
+                value={draft?.medicalHistory ?? ''}
+                onChange={(e) => updateDraft({ medicalHistory: e.target.value })}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-none"
+              />
+            </div>
+          </div>
+        )}
+      </EditSection>
+
+      {/* ── Care-team flags (AFTER path only) ──────────────────────────────── */}
+      {profile.path === 'AFTER' && (
+        <EditSection
+          title="Care-team notes"
+          editing={editingJourney /* reuse — care-team is part of journey context */}
+          onEdit={() => setEditingJourney(true)}
+          onCancel={() => cancelSection(setEditingJourney)}
+          onSave={async () => {
+            await saveProfile('journey', { path: draft!.path, careTeamFlags: draft!.careTeamFlags })
+            setEditingJourney(false)
+          }}
+          saving={savingSection === 'journey'}
+        >
+          {profile.careTeamFlags.length > 0 ? (
+            <ul className="space-y-1 text-sm text-gray-700">
+              {profile.careTeamFlags.map((f) => (
+                <li key={f} className="capitalize">{CARE_TEAM_FLAGS.find((ct) => ct.value === f)?.label ?? f}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-gray-400">No care-team notes selected.</p>
+          )}
+          {editingJourney && (
+            <div className="mt-3 space-y-2">
+              {CARE_TEAM_FLAGS.map(({ value, label }) => (
+                <label key={value} className="flex items-start gap-3 rounded-lg border border-gray-200 p-3 cursor-pointer hover:bg-gray-50">
+                  <input type="checkbox" checked={draft?.careTeamFlags.includes(value) ?? false} onChange={() => updateDraft({ careTeamFlags: toggleItem(draft?.careTeamFlags ?? [], value) })} className="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600" />
+                  <span className="text-sm text-gray-700">{label}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </EditSection>
+      )}
+
+      {/* ── Sensitive flags ─────────────────────────────────────────────────── */}
+      <EditSection
+        title="Health & safety settings"
+        editing={editingSensitive}
+        onEdit={() => setEditingSensitive(true)}
+        onCancel={() => cancelSection(setEditingSensitive)}
+        onSave={async () => {
+          await saveProfile('sensitive', {
+            isPregnant: draft!.isPregnant,
+            hasKidneyDisease: draft!.hasKidneyDisease,
+            takesInsulin: draft!.takesInsulin,
+            hasEdHistory: draft!.hasEdHistory,
+            hideCalories: draft!.hideCalories,
+          })
+          setEditingSensitive(false)
+        }}
+        saving={savingSection === 'sensitive'}
+      >
+        {!editingSensitive ? (
+          <dl className="space-y-1.5 text-sm">
+            <Row label="Pregnant/breastfeeding" value={profile.isPregnant ? 'Yes' : 'No'} />
+            <Row label="Kidney disease" value={profile.hasKidneyDisease ? 'Yes' : 'No'} />
+            <Row label="Takes insulin" value={profile.takesInsulin ? 'Yes' : 'No'} />
+            <Row label="ED history" value={profile.hasEdHistory ? 'Yes' : 'No'} />
+            <Row label="Calorie display" value={profile.hideCalories ? 'Hidden' : 'Shown'} />
+          </dl>
+        ) : (
+          <div className="space-y-3">
+            {([
+              { field: 'isPregnant' as const, label: 'Currently pregnant or breastfeeding?' },
+              { field: 'hasKidneyDisease' as const, label: 'Have kidney disease?' },
+              { field: 'takesInsulin' as const, label: 'Take insulin?' },
+              { field: 'hasEdHistory' as const, label: 'History of disordered eating?' },
+            ]).map(({ field, label }) => (
+              <div key={field} className="rounded-lg border border-gray-200 p-3 flex items-center justify-between gap-4">
+                <span className="text-sm text-gray-700">{label}</span>
+                <div className="flex gap-3">
+                  {(['Yes', 'No'] as const).map((opt) => (
+                    <label key={opt} className="flex items-center gap-1 cursor-pointer">
+                      <input type="radio" checked={opt === 'Yes' ? draft?.[field] : !draft?.[field]} onChange={() => updateDraft({ [field]: opt === 'Yes' })} name={field} className="h-4 w-4 text-green-600" />
+                      <span className="text-sm text-gray-700">{opt}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="rounded-lg border border-gray-200 p-3 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-gray-700">Hide calorie numbers</p>
+                <p className="text-xs text-gray-500 mt-0.5">Focus on nutrients instead of calories.</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={draft?.hideCalories}
+                onClick={() => updateDraft({ hideCalories: !draft?.hideCalories })}
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors ${draft?.hideCalories ? 'bg-green-600' : 'bg-gray-200'}`}
+              >
+                <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${draft?.hideCalories ? 'translate-x-5' : 'translate-x-0'}`} />
+              </button>
+            </div>
+          </div>
+        )}
+      </EditSection>
+
+      {/* ── Goals ───────────────────────────────────────────────────────────── */}
+      <EditSection
+        title="Nutrition goals"
+        editing={editingGoals}
+        onEdit={() => { setGoalsDraft(goals); setEditingGoals(true) }}
+        onCancel={() => { setGoalsDraft(goals); setSuggestShown(false); setEditingGoals(false); setSaveError(null) }}
+        onSave={async () => {
+          await saveGoals(goalsDraft)
+          setEditingGoals(false)
+        }}
+        saving={savingSection === 'goals'}
+      >
+        {!editingGoals ? (
+          goals.length > 0 ? (
+            <ul className="space-y-2">
+              {goals.map((g) => {
+                const { cls, label } = sourceBadge(g.source)
+                return (
+                  <li key={goalKey(g)} className="flex items-center justify-between gap-2 text-sm">
+                    <span className="capitalize text-gray-800">{g.label ?? g.nutrient}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {(g.targetMin !== undefined || g.targetMax !== undefined) && (
+                        <span className="text-gray-500 text-xs">{targetRange(g)}</span>
+                      )}
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cls}`}>{label}</span>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          ) : (
+            <p className="text-sm text-gray-400">No goals set. Click Edit to add some.</p>
+          )
+        ) : (
+          <div className="space-y-5">
+            {/* Add a specific goal */}
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-gray-600">Add a specific goal</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={goalInput}
+                  onChange={(e) => setGoalInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddGoalInput()}
+                  placeholder="e.g. eat more iron-rich foods…"
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+                <button type="button" onClick={handleAddGoalInput} disabled={!goalInput.trim()} className="px-3 py-2 bg-green-600 text-white text-sm rounded-lg disabled:opacity-40 hover:bg-green-700">
+                  Add
+                </button>
+              </div>
+              {goalInputPreview && (
+                <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">
+                  Maps to: {goalInputPreview.label ?? goalInputPreview.nutrient} — {targetRange(goalInputPreview)}
+                </p>
+              )}
+            </div>
+
+            {/* Suggest from context */}
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-gray-600">Suggest goals for me</p>
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                Suggestions come from general guidelines — <strong>not medical advice.</strong>
+              </p>
+              <textarea
+                value={suggestText}
+                onChange={(e) => setSuggestText(e.target.value)}
+                rows={2}
+                placeholder="e.g. I've been feeling tired, doctor mentioned iron…"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-none"
+              />
+              <button type="button" onClick={handleSuggestGoals} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700">
+                Suggest goals
+              </button>
+              {suggestShown && suggestions.length > 0 && (
+                <div className="space-y-2">
+                  {suggestions.map((g) => {
+                    const key = goalKey(g)
+                    return (
+                      <label key={key} className="flex items-start gap-2 cursor-pointer bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                        <input type="checkbox" checked={suggestChecked.has(key)} onChange={() => setSuggestChecked((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })} className="mt-0.5 h-4 w-4 rounded text-green-600" />
+                        <div className="text-xs">
+                          <span className="font-medium capitalize">{g.label ?? g.nutrient}</span>
+                          <span className="text-gray-500 ml-1">— {targetRange(g)}</span>
+                          <p className="text-gray-400 mt-0.5">{g.reason}</p>
+                        </div>
+                      </label>
+                    )
+                  })}
+                  <button type="button" onClick={handleAddSuggested} disabled={suggestChecked.size === 0} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg disabled:opacity-40 hover:bg-green-700">
+                    Add selected
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Care-team goals (AFTER path) */}
+            {profile.path === 'AFTER' && careTeamGoals.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-gray-600">From your care team</p>
+                {careTeamGoals.map((g) => (
+                  <button key={goalKey(g)} type="button" onClick={() => addGoalToDraft(g)} className="w-full flex items-center justify-between text-xs px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 text-gray-800">
+                    <span className="capitalize">{g.label ?? g.nutrient}</span>
+                    <span className="text-gray-500">{targetRange(g)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Current draft goals */}
+            {goalsDraft.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-600">Current goals ({goalsDraft.length})</p>
+                {goalsDraft.map((g) => (
+                  <div key={goalKey(g)} className="flex items-center justify-between text-xs bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                    <span className="capitalize font-medium">{g.label ?? g.nutrient}</span>
+                    <div className="flex items-center gap-2">
+                      {(g.targetMin !== undefined || g.targetMax !== undefined) && <span className="text-gray-500">{targetRange(g)}</span>}
+                      <button type="button" onClick={() => removeGoalFromDraft(goalKey(g))} className="text-gray-400 hover:text-red-500" aria-label="Remove">✕</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </EditSection>
+
+      {/* Not medical advice */}
+      <p className="text-xs text-gray-400 text-center pt-2 pb-6">
+        Not medical advice. Always consult your healthcare team before making dietary changes.
+      </p>
+    </div>
+  )
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <dt className="text-gray-500 shrink-0">{label}</dt>
+      <dd className="text-gray-900 text-right capitalize">{value}</dd>
     </div>
   )
 }

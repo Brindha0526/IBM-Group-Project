@@ -114,5 +114,14 @@ export async function POST(request: Request) {
     },
   })
 
-  return NextResponse.json({ success: true })
+  // Set a lightweight cookie so middleware knows this user has a profile,
+  // avoiding a DB query on every request.
+  const res = NextResponse.json({ success: true })
+  res.cookies.set('nutripath_has_profile', '1', {
+    path: '/',
+    httpOnly: false, // readable by middleware (edge)
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 365, // 1 year
+  })
+  return res
 }

@@ -13,6 +13,7 @@
     "@supabase/ssr": "^0.1.0",
     "@supabase/supabase-js": "^2.38.5",
     "next": "14.0.4",
+    "@anthropic-ai/sdk": "^0.30.0",
     "react": "^18",
     "react-dom": "^18",
     "zod": "^3.22.4"

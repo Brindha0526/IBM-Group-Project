@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 /**
  * Middleware: refreshes the Supabase session on every request and redirects
  * unauthenticated users away from protected (app) routes to /login.
+ * New users who have no profile yet are sent to /onboarding.
  */
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({
@@ -49,7 +50,7 @@ export async function middleware(request: NextRequest) {
 
   const { pathname } = request.nextUrl
 
-  // Auth pages — always allow through, never redirect unauthenticated users away
+  // Auth pages — always allow through
   const isAuthPage = pathname === '/login' || pathname === '/signup'
 
   // If logged in and on an auth page, send to /profile
@@ -57,7 +58,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/profile', request.url))
   }
 
-  // Protect all routes under /(app) — these map to paths like /profile, /goals, etc.
+  // Protect all routes under /(app)
   const isAppRoute =
     pathname.startsWith('/profile') ||
     pathname.startsWith('/goals') ||
@@ -66,13 +67,24 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/plan') ||
     pathname.startsWith('/grocery') ||
     pathname.startsWith('/summary') ||
-    pathname.startsWith('/find-dietitian')
+    pathname.startsWith('/find-dietitian') ||
+    pathname.startsWith('/onboarding')
 
-  // Unauthenticated on a protected route → send to /login (never redirect /login itself)
+  // Unauthenticated on a protected route → send to /login
   if (isAppRoute && !isAuthPage && !session) {
     const loginUrl = new URL('/login', request.url)
     loginUrl.searchParams.set('redirectTo', pathname)
     return NextResponse.redirect(loginUrl)
+  }
+
+  // New users with no profile → send to /onboarding (skip if already there)
+  if (session && isAppRoute && pathname !== '/onboarding') {
+    // We use a cookie as a lightweight "has profile" signal to avoid a DB
+    // query on every request. The cookie is set by /api/profile after save.
+    const hasProfile = request.cookies.get('nutripath_has_profile')?.value === '1'
+    if (!hasProfile) {
+      return NextResponse.redirect(new URL('/onboarding', request.url))
+    }
   }
 
   return response

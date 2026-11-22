@@ -229,7 +229,10 @@ type KeywordEntry = {
 
 const KEYWORD_MAP: KeywordEntry[] = [
   {
-    keywords: ['anaemia', 'anemia', 'low iron', 'iron deficiency'],
+    keywords: [
+      'anaemia', 'anemia', 'low iron', 'iron deficiency', 'iron levels',
+      'iron low', 'need more iron', 'eat more iron',
+    ],
     goals: [
       {
         nutrient: 'iron',
@@ -242,7 +245,11 @@ const KEYWORD_MAP: KeywordEntry[] = [
     ],
   },
   {
-    keywords: ['b12', 'vitamin b12', 'b-12', 'fatigue', 'tiredness', 'low energy'],
+    keywords: [
+      'b12', 'vitamin b12', 'b-12', 'fatigue', 'tiredness', 'low energy',
+      'tired all the time', 'always tired', 'lack of energy', 'feeling tired',
+      'vitamin b', 'b12 low', 'low b12',
+    ],
     goals: [
       {
         nutrient: 'vitamin b12',
@@ -255,13 +262,16 @@ const KEYWORD_MAP: KeywordEntry[] = [
     ],
     extraCondition: (text) => {
       const hasB12Term = /b12|b-12|vitamin b/.test(text)
-      const hasFatigue = /fatigue|tiredness/.test(text)
-      const hasFoodContext = /diet|eat|food|nutrient|vitamin/.test(text)
-      return hasB12Term || (hasFatigue && hasFoodContext)
+      const hasFatigue = /fatigue|tiredness|tired|energy/.test(text)
+      return hasB12Term || hasFatigue
     },
   },
   {
-    keywords: ['constipation', 'digestive', 'bowel', 'fibre', 'fiber'],
+    keywords: [
+      'constipation', 'digestive', 'bowel', 'fibre', 'fiber',
+      'gut health', 'gut', 'bloating', 'bloated', 'irregular',
+      'more fibre', 'more fiber', 'eat more vegetables',
+    ],
     goals: [
       {
         nutrient: 'fiber',
@@ -274,7 +284,11 @@ const KEYWORD_MAP: KeywordEntry[] = [
     ],
   },
   {
-    keywords: ['cholesterol', 'heart', 'lipids', 'cardiovascular'],
+    keywords: [
+      'cholesterol', 'heart', 'lipids', 'cardiovascular',
+      'heart health', 'heart disease', 'coronary', 'saturated fat',
+      'high fat', 'high ldl', 'high cholesterol',
+    ],
     goals: [
       {
         nutrient: 'saturated fat',
@@ -296,12 +310,9 @@ const KEYWORD_MAP: KeywordEntry[] = [
   },
   {
     keywords: [
-      'blood sugar',
-      'glucose',
-      'diabetes',
-      'insulin resistance',
-      'glycaemic',
-      'glycemic',
+      'blood sugar', 'glucose', 'diabetes', 'insulin resistance',
+      'glycaemic', 'glycemic', 'type 2', 'pre-diabetes', 'prediabetes',
+      'sugar levels', 'sugary', 'too much sugar', 'reduce sugar', 'cut sugar',
     ],
     goals: [
       {
@@ -323,7 +334,11 @@ const KEYWORD_MAP: KeywordEntry[] = [
     ],
   },
   {
-    keywords: ['bone', 'osteoporosis', 'osteopenia', 'fracture'],
+    keywords: [
+      'bone', 'osteoporosis', 'osteopenia', 'fracture',
+      'bone density', 'calcium', 'low calcium', 'bone health',
+      'vitamin d', 'low vitamin d', 'vitamin d low', 'sunshine vitamin',
+    ],
     goals: [
       {
         nutrient: 'calcium',
@@ -344,7 +359,11 @@ const KEYWORD_MAP: KeywordEntry[] = [
     ],
   },
   {
-    keywords: ['blood pressure', 'hypertension', 'high bp'],
+    keywords: [
+      'blood pressure', 'hypertension', 'high bp',
+      'high blood pressure', 'bp', 'reduce salt', 'less salt',
+      'lower sodium', 'cut salt', 'sodium',
+    ],
     goals: [
       {
         nutrient: 'sodium',
@@ -364,6 +383,32 @@ const KEYWORD_MAP: KeywordEntry[] = [
       },
     ],
   },
+  {
+    keywords: [
+      'weight', 'overweight', 'lose weight', 'healthy weight',
+      'eat healthier', 'eat better', 'healthier diet', 'balanced diet',
+      'general health', 'overall health', 'wellness', 'feel better',
+      'improve diet', 'nutrition', 'nutrient', 'healthy eating',
+    ],
+    goals: [
+      {
+        nutrient: 'fiber',
+        targetMin: 28,
+        unit: 'g',
+        source: 'CURATED',
+        reason:
+          'Fibre supports fullness and overall diet quality. Source: Dietary Guidelines for Americans.',
+      },
+      {
+        nutrient: 'added sugars',
+        targetMax: 50,
+        unit: 'g',
+        source: 'CURATED',
+        reason:
+          'Keeping added sugars in check supports a balanced diet. Source: Dietary Guidelines for Americans.',
+      },
+    ],
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -380,7 +425,7 @@ const KEYWORD_MAP: KeywordEntry[] = [
  * Sources: NIH Office of Dietary Supplements, Dietary Guidelines for Americans 2020–2025.
  */
 export function suggestGoalsFromHistory(text: string): SuggestedGoal[] {
-  const lower = text.toLowerCase()
+  const lower = text.trim().toLowerCase()
   const accumulated = new Map<string, SuggestedGoal>()
 
   for (const entry of KEYWORD_MAP) {
@@ -409,6 +454,17 @@ export function suggestGoalsFromHistory(text: string): SuggestedGoal[] {
         })
       }
     }
+  }
+
+  // If nothing matched, return the Dietary Guidelines baseline so the user
+  // always gets useful suggestions rather than an empty list.
+  if (accumulated.size === 0) {
+    return GUIDELINES_BASELINE.map((g) => ({
+      ...g,
+      source: 'CURATED' as const,
+      reason:
+        'General healthy eating targets from the Dietary Guidelines for Americans 2020–2025.',
+    }))
   }
 
   return Array.from(accumulated.values())
