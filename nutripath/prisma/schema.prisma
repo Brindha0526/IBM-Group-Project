@@ -1,0 +1,90 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  createdAt DateTime  @default(now())
+  profile   Profile?
+  foodLogs  FoodLog[]
+  goals     Goal[]
+}
+
+model Profile {
+  id               String         @id @default(cuid())
+  userId           String         @unique
+  user             User           @relation(fields: [userId], references: [id])
+  path             Path           // BEFORE | AFTER
+  // Before-path fields
+  budget           String?        // e.g. "low" | "medium" | "high"
+  schedule         String?        // e.g. "busy_weekdays"
+  cuisines         String[]       // free-text entries; any cuisine is valid — no fixed list
+  religiousRules   String[]       // free-text e.g. ["halal", "kosher", "vegan"]
+  preferences      String[]       // free-form tags
+  allergens        String[]       // from fixed FDA major-9 list
+  medications      String[]       // free-text entries; user types any medication name
+  medicalHistory   String?        // optional free-text; used to suggest curated goals
+  // After-path fields
+  careTeamFlags    CareTeamFlag[] // from fixed list in GUIDELINES
+  // Sensitive flags (triggers general-only mode)
+  isPregnant       Boolean        @default(false)
+  hasKidneyDisease Boolean        @default(false)
+  takesInsulin     Boolean        @default(false)
+  hasEdHistory     Boolean        @default(false)
+  hideCalories     Boolean        @default(false)
+}
+
+model Goal {
+  id        String     @id @default(cuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id])
+  nutrient  String     // e.g. "iron", "fiber", "sodium"
+  targetMin Float?
+  targetMax Float?
+  unit      String     // e.g. "mg", "g"
+  source    GoalSource // see enum below
+  label     String?    // optional display name set by user e.g. "Eat more fibre"
+  createdAt DateTime   @default(now())
+}
+
+model FoodLog {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  loggedAt     DateTime @default(now())
+  fdcId        String   // USDA FoodData Central ID
+  foodName     String
+  servingG     Float    // grams
+  nutrients    Json     // snapshot of USDA nutrient data at log time
+  safetyPassed Boolean  // result of runSafetyRules() at log time
+}
+
+enum Path {
+  BEFORE
+  AFTER
+}
+
+enum GoalSource {
+  GUIDELINES   // derived from Dietary Guidelines for Americans
+  CARE_TEAM    // derived from a CareTeamFlag the user selected
+  USER_DEFINED // the user typed in their own goal
+  CURATED      // system-suggested from medical history text, confirmed by user
+}
+
+enum CareTeamFlag {
+  LOW_IRON
+  LOW_VITAMIN_D
+  LOW_B12
+  HIGH_CHOLESTEROL
+  HIGH_BLOOD_SUGAR
+  HIGH_BLOOD_PRESSURE
+}
