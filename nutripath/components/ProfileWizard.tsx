@@ -1183,6 +1183,15 @@ const BLANK: WizardProfile = {
   caloricGoalKcal: null,
 }
 
+/** sessionStorage key for the first-time onboarding draft (cleared after save). */
+const DRAFT_KEY = 'nutripath_wizard_draft'
+
+interface WizardDraft {
+  step: number
+  profile: WizardProfile
+  pendingGoals: NutrientTarget[]
+}
+
 export default function ProfileWizard({
   initialProfile,
   initialGoals = [],
@@ -1194,6 +1203,38 @@ export default function ProfileWizard({
   const [pendingGoals, setPendingGoals] = useState<NutrientTarget[]>(initialGoals)
   const [loading, setLoading] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  // ── Draft persistence (first-time onboarding only) ──────────────────────────
+  // Restore after mount, not in useState initialisers: the server render has no
+  // sessionStorage, so reading it during the first render would cause a
+  // hydration mismatch. `draftRestored` keeps the save effect from overwriting
+  // a stored draft with the blank initial state before the restore has run.
+  const persistDraft = !initialProfile
+  const [draftRestored, setDraftRestored] = useState(false)
+
+  useEffect(() => {
+    if (!persistDraft) return
+    try {
+      const raw = sessionStorage.getItem(DRAFT_KEY)
+      if (raw) {
+        const draft = JSON.parse(raw) as Partial<WizardDraft>
+        const restoredProfile: WizardProfile = { ...BLANK, ...draft.profile }
+        setProfile(restoredProfile)
+        if (Array.isArray(draft.pendingGoals)) setPendingGoals(draft.pendingGoals)
+        const max = totalSteps(restoredProfile.path)
+        if (typeof draft.step === 'number' && draft.step >= 1) setStep(Math.min(draft.step, max))
+      }
+    } catch { /* corrupt or unavailable storage — start fresh */ }
+    setDraftRestored(true)
+  }, [persistDraft])
+
+  useEffect(() => {
+    if (!persistDraft || !draftRestored) return
+    try {
+      const draft: WizardDraft = { step, profile, pendingGoals }
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
+    } catch { /* storage full or private mode — persistence is best-effort */ }
+  }, [persistDraft, draftRestored, step, profile, pendingGoals])
 
   function update(patch: Partial<WizardProfile>) {
     setProfile((prev) => ({ ...prev, ...patch }))
@@ -1234,6 +1275,9 @@ export default function ProfileWizard({
 
     try {
       await onSave({ profile, goals: goalsToSave })
+      if (persistDraft) {
+        try { sessionStorage.removeItem(DRAFT_KEY) } catch { /* ignore */ }
+      }
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
     } finally {
