@@ -8,7 +8,7 @@
 // Nutrition numbers are USDA-sourced — the AI never produces them.
 // A "Not medical advice" note is shown per GUIDELINES §Safety rules rule 9.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
   VerifiedMealPlan,
   VerifiedDayPlan,
@@ -346,10 +346,19 @@ export default function PlanPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [plan, setPlan] = useState<VerifiedMealPlan | null>(null)
-  // hideCalories comes from the API response (profile.hideCalories).
-  // We read it from the plan response's presence of a sensitive note.
-  // For now, default to showing calories; the server already enforces general-only mode.
-  const hideCalories = false
+  // Hide calories if the user set the toggle OR disclosed an ED history.
+  // Defaults to hidden until the profile loads so numbers never flash on screen.
+  const [hideCalories, setHideCalories] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/profile/me')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const p = d?.profile
+        setHideCalories(Boolean(p?.hideCalories) || Boolean(p?.hasEdHistory))
+      })
+      .catch(() => {/* keep hidden on error */})
+  }, [])
 
   async function handleGenerate() {
     setLoading(true)

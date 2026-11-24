@@ -466,8 +466,9 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
 
   return (
     <div className="space-y-6">
-      {/* Low-intake banner — GUIDELINES §7: supportive only, never shown when hideCalories */}
-      {!hideCalories && lowIntakeDays >= 3 && (
+      {/* Low-intake banner — GUIDELINES §7: supportive only, contains no numbers,
+          so it is shown even when calories are hidden (incl. ED history). */}
+      {lowIntakeDays >= 3 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           It looks like your intake has been low for a few days. If you&apos;re struggling,
           please reach out to your care team or a support line.
@@ -561,7 +562,8 @@ function LogPageInner() {
       .catch(() => {/* no-op — profile may not exist yet */})
   }, [])
 
-  const hideCalories = profile?.hideCalories ?? false
+  // Hide calories if the user set the toggle OR disclosed an ED history
+  const hideCalories = (profile?.hideCalories ?? false) || (profile?.hasEdHistory ?? false)
 
   function handleLogged() {
     // Bump the check-in tab so its data refreshes when user switches to it
