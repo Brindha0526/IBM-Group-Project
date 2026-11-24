@@ -6,6 +6,8 @@ import {
   summarizeWeek,
   buildWeeklyReport,
   visibleGoals,
+  foodFrequency,
+  suggestTopics,
   type SummaryLog,
   type SummaryGoal,
 } from '@/lib/summary'
@@ -148,5 +150,78 @@ describe('buildWeeklyReport', () => {
   it('visibleGoals drops calorie goals only when hidden', () => {
     expect(visibleGoals(goals, true)).toEqual([fiber])
     expect(visibleGoals(goals, false)).toEqual(goals)
+  })
+})
+
+describe('appointment prep', () => {
+  const logs = [
+    log(KEYS[0], 'Oatmeal', { Energy: 300, 'Fiber, total dietary': 4 }, 40),
+    log(KEYS[1], 'oatmeal', { Energy: 300, 'Fiber, total dietary': 4 }, 60),
+    log(KEYS[1], 'Peanut butter', { Energy: 200 }, 30),
+    log(KEYS[2], 'Lentils', { Energy: 700, 'Fiber, total dietary': 30 }),
+  ]
+  const goals = [fiber, sodium]
+  const week = summarizeWeek(logs, goals, KEYS, toKey)
+
+  it('foodFrequency groups case-insensitively, most frequent first', () => {
+    const f = foodFrequency(logs)
+    expect(f[0]).toEqual({ name: 'Oatmeal', count: 2, totalG: 100 })
+    expect(f.map((x) => x.name)).toEqual(['Oatmeal', 'Lentils', 'Peanut butter'])
+  })
+
+  const topics = suggestTopics({
+    week,
+    goals,
+    careTeamFlags: ['LOW_IRON'],
+    medications: ['warfarin'],
+    allergenFlaggedFoods: ['Peanut butter'],
+  })
+
+  it('suggests topics from care-team flags, missed goals, allergens, medications, low intake and sparse logging', () => {
+    expect(topics.some((t) => t.includes('care team mentioned about low iron'))).toBe(true)
+    expect(topics.some((t) => t.includes('fibre goal') && t.includes('1 of 3'))).toBe(true)
+    expect(topics.some((t) => t.includes('sodium'))).toBe(false) // met every logged day
+    expect(topics.some((t) => t.includes('Peanut butter'))).toBe(true)
+    expect(topics.some((t) => t.includes('medications'))).toBe(true)
+    expect(topics.some((t) => t.includes('lighter than usual'))).toBe(true) // 3 days under the floor
+    expect(topics.some((t) => t.includes('tracking'))).toBe(true) // only 3 days logged
+  })
+
+  it('never names medications, numbers for intake, or diagnoses', () => {
+    const all = topics.join(' ').toLowerCase()
+    expect(all).not.toContain('warfarin')
+    expect(all).not.toContain('kcal')
+    expect(all).not.toMatch(/you have (low|high)/)
+  })
+
+  it('topic wording avoids GUIDELINES banned phrases', () => {
+    const all = topics.join(' ').toLowerCase()
+    for (const banned of ['good food', 'bad food', 'cheat day', 'burn it off', 'fat ']) {
+      expect(all).not.toContain(banned)
+    }
+  })
+
+  it('adds a gentle default when nothing stands out', () => {
+    const goodWeek = summarizeWeek(
+      KEYS.slice(0, 5).map((k) => log(k, 'Lentils', { Energy: 1500, 'Fiber, total dietary': 30 })),
+      [fiber], KEYS, toKey
+    )
+    expect(suggestTopics({ week: goodWeek, goals: [fiber], careTeamFlags: [], medications: [], allergenFlaggedFoods: [] }))
+      .toEqual(['Share what has been working well this week and what you would like to focus on next.'])
+  })
+
+  it('appointment report includes topics, foods and care-team notes', () => {
+    const text = buildWeeklyReport(week, goals, {
+      hideCalories: false,
+      generatedAt: new Date(2026, 10, 24),
+      appointment: { foods: foodFrequency(logs), topics, careTeamFlags: ['LOW_IRON'] },
+    })
+    expect(text).toContain('NutriPath — Appointment summary')
+    expect(text).toContain('My care team mentioned: low iron')
+    expect(text).toContain('WHAT I ATE MOST THIS WEEK')
+    expect(text).toContain('Oatmeal (2×, 100 g total)')
+    expect(text).toContain('TOPICS TO RAISE')
+    expect(text).toContain('1. Follow up on what your care team mentioned about low iron')
+    expect(text).toContain('FOOD LOG')
   })
 })

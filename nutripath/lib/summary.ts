@@ -195,6 +195,91 @@ export function summarizeWeek(
   }
 }
 
+// ─── Appointment prep ─────────────────────────────────────────────────────────
+
+export interface FoodFrequency {
+  name: string
+  count: number
+  totalG: number
+}
+
+/** Foods eaten this week, most frequent first (ties: larger total grams first). */
+export function foodFrequency(logs: SummaryLog[]): FoodFrequency[] {
+  const map = new Map<string, FoodFrequency>()
+  for (const l of logs) {
+    const key = l.foodName.trim().toLowerCase()
+    const cur = map.get(key) ?? { name: l.foodName.trim(), count: 0, totalG: 0 }
+    cur.count += 1
+    cur.totalG += l.servingG
+    map.set(key, cur)
+  }
+  return Array.from(map.values()).sort((a, b) => b.count - a.count || b.totalG - a.totalG)
+}
+
+/** GUIDELINES fixed list — phrased as what the care team mentioned, never a diagnosis. */
+export const CARE_TEAM_FLAG_LABELS: Record<string, string> = {
+  LOW_IRON: 'low iron',
+  LOW_VITAMIN_D: 'low vitamin D',
+  LOW_B12: 'low B12',
+  HIGH_CHOLESTEROL: 'high cholesterol',
+  HIGH_BLOOD_SUGAR: 'high blood sugar',
+  HIGH_BLOOD_PRESSURE: 'high blood pressure',
+}
+
+export interface TopicInput {
+  week: WeekSummary
+  goals: SummaryGoal[]
+  careTeamFlags: string[]
+  medications: string[]
+  /** Names of logged foods that matched the user's allergens */
+  allergenFlaggedFoods: string[]
+}
+
+/**
+ * Deterministic conversation starters for a dietitian visit.
+ * Wording follows GUIDELINES: supportive, no judgement, defer to the care team.
+ */
+export function suggestTopics({ week, goals, careTeamFlags, medications, allergenFlaggedFoods }: TopicInput): string[] {
+  const topics: string[] = []
+
+  for (const flag of careTeamFlags) {
+    const label = CARE_TEAM_FLAG_LABELS[flag]
+    if (label) topics.push(`Follow up on what your care team mentioned about ${label}, and which foods help.`)
+  }
+
+  if (week.daysLogged > 0) {
+    for (const stat of week.goalStats) {
+      if (!goalHasTarget(stat.goal) || isCalorieNutrient(stat.goal.nutrient)) continue
+      if (stat.daysMet < stat.daysLogged / 2) {
+        topics.push(`Ask about easier ways to reach your ${goalLabel(stat.goal).toLowerCase()} goal (${goalTargetText(stat.goal)}) — it was met on ${stat.daysMet} of ${stat.daysLogged} logged days.`)
+      }
+    }
+  }
+
+  if (allergenFlaggedFoods.length > 0) {
+    const names = Array.from(new Set(allergenFlaggedFoods)).slice(0, 5).join(', ')
+    topics.push(`Some logged foods may contain an allergen on your list (${names}). Ask about safe swaps and reading labels.`)
+  }
+
+  if (medications.length > 0) {
+    topics.push('Ask whether any foods interact with your medications. Your pharmacist can help too.')
+  }
+
+  if (week.lowIntakeDays >= 3) {
+    topics.push('Some days this week looked lighter than usual. It may help to talk about appetite, energy and how meals have been feeling.')
+  }
+
+  if (week.daysLogged < 4) {
+    topics.push('Talk about what would make tracking meals easier day to day.')
+  }
+
+  if (topics.length === 0 && goals.length > 0) {
+    topics.push('Share what has been working well this week and what you would like to focus on next.')
+  }
+
+  return topics
+}
+
 // ─── Plain-text export ────────────────────────────────────────────────────────
 
 function fmtNum(n: number): string {
@@ -210,6 +295,11 @@ export function formatDayKey(key: string): string {
 export interface ReportOptions {
   hideCalories: boolean
   generatedAt: Date
+  appointment?: {
+    foods: FoodFrequency[]
+    topics: string[]
+    careTeamFlags: string[]
+  }
 }
 
 /** Plain-text weekly report a user can share with their dietitian. */
@@ -219,12 +309,17 @@ export function buildWeeklyReport(week: WeekSummary, goals: SummaryGoal[], opts:
   const last = week.days[week.days.length - 1]?.key
   const lines: string[] = []
 
-  lines.push('NutriPath — Weekly summary')
+  lines.push(opts.appointment ? 'NutriPath — Appointment summary' : 'NutriPath — Weekly summary')
   if (first && last) lines.push(`${formatDayKey(first)} – ${formatDayKey(last)}`)
   lines.push(`Generated ${opts.generatedAt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}`)
   lines.push('Nutrition numbers: USDA FoodData Central. Not medical advice.')
   lines.push('')
   lines.push(`Days with food logged: ${week.daysLogged} of ${week.days.length}`)
+
+  if (opts.appointment && opts.appointment.careTeamFlags.length > 0) {
+    const labels = opts.appointment.careTeamFlags.map((f) => CARE_TEAM_FLAG_LABELS[f]).filter(Boolean)
+    if (labels.length > 0) lines.push(`My care team mentioned: ${labels.join(', ')}`)
+  }
 
   // Averages
   lines.push('')
@@ -245,6 +340,20 @@ export function buildWeeklyReport(week: WeekSummary, goals: SummaryGoal[], opts:
       lines.push(`  ${goalLabel(s.goal)}: ${avg}${target}`)
     }
     if (stats.length === 0) lines.push('  No nutrition goals set.')
+  }
+
+  // Appointment prep
+  if (opts.appointment) {
+    lines.push('')
+    lines.push('WHAT I ATE MOST THIS WEEK')
+    if (opts.appointment.foods.length === 0) lines.push('  Nothing logged.')
+    for (const f of opts.appointment.foods.slice(0, 10)) {
+      lines.push(`  - ${f.name} (${f.count}×, ${fmtNum(f.totalG)} g total)`)
+    }
+    lines.push('')
+    lines.push('TOPICS TO RAISE')
+    if (opts.appointment.topics.length === 0) lines.push('  None suggested.')
+    opts.appointment.topics.forEach((t, i) => lines.push(`  ${i + 1}. ${t}`))
   }
 
   // Full food log

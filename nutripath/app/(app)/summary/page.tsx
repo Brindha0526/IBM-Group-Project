@@ -3,14 +3,21 @@
 // app/(app)/summary/page.tsx
 // Weekly summary — calories (or foods logged) per day, goals met per day, and a
 // plain-text, print-friendly report to share with a dietitian.
+// ?mode=appointment switches to appointment prep: what you ate, goals met and
+// suggested topics to raise (deterministic rules, no AI).
 // "This week" = the last 7 local days including today.
 
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { lastNDateKeys, logRangeQuery } from '@/lib/dates'
+import { matchAllergens } from '@/lib/safety/allergens'
 import {
   summarizeWeek,
   buildWeeklyReport,
+  foodFrequency,
+  suggestTopics,
+  CARE_TEAM_FLAG_LABELS,
   visibleGoals,
   goalLabel,
   goalTargetText,
@@ -20,12 +27,17 @@ import {
   type SummaryGoal,
   type DaySummary,
   type GoalStatus,
+  type WeekSummary,
+  type FoodFrequency,
 } from '@/lib/summary'
 
 interface SummaryProfile {
   hideCalories: boolean
   hasEdHistory: boolean
   caloricGoalKcal: number | null
+  careTeamFlags: string[]
+  medications: string[]
+  allergens: string[]
 }
 
 // ─── Chart ────────────────────────────────────────────────────────────────────
@@ -196,9 +208,98 @@ function ReportExport({ text, filename }: { text: string; filename: string }) {
   )
 }
 
+// ─── Appointment prep ─────────────────────────────────────────────────────────
+
+function AppointmentPrep({
+  week,
+  foods,
+  topics,
+  careTeamFlags,
+}: {
+  week: WeekSummary
+  foods: FoodFrequency[]
+  topics: string[]
+  careTeamFlags: string[]
+}) {
+  const tracked = week.goalStats.filter((s) => goalHasTarget(s.goal))
+  const flagLabels = careTeamFlags.map((f) => CARE_TEAM_FLAG_LABELS[f]).filter(Boolean)
+
+  return (
+    <div className="space-y-4 print:hidden">
+      <section className="rounded-lg border border-gray-200 bg-white p-4">
+        <h2 className="text-sm font-semibold text-gray-900">Topics you could raise</h2>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Conversation starters based on this week&apos;s log. Your dietitian will know what&apos;s right for you.
+        </p>
+        {topics.length === 0 ? (
+          <p className="mt-3 text-sm text-gray-500">Nothing specific this week — bring any questions you have.</p>
+        ) : (
+          <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-gray-800">
+            {topics.map((t, i) => <li key={i}>{t}</li>)}
+          </ol>
+        )}
+      </section>
+
+      {flagLabels.length > 0 && (
+        <section className="rounded-lg border border-purple-200 bg-purple-50 p-4 text-sm text-purple-900">
+          <span className="font-semibold">Your care team mentioned:</span> {flagLabels.join(', ')}
+        </section>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <section className="rounded-lg border border-gray-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-gray-900">What you ate most</h2>
+          {foods.length === 0 ? (
+            <p className="mt-3 text-sm text-gray-500">Nothing logged this week.</p>
+          ) : (
+            <ul className="mt-3 space-y-1.5 text-sm">
+              {foods.slice(0, 10).map((f) => (
+                <li key={f.name} className="flex justify-between gap-3">
+                  <span className="truncate text-gray-800">{f.name}</span>
+                  <span className="shrink-0 tabular-nums text-xs text-gray-500">{f.count}×</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-gray-900">Goals met</h2>
+          {tracked.length === 0 ? (
+            <p className="mt-3 text-sm text-gray-500">
+              No goals with a numeric target. <Link href="/goals" className="text-blue-600 hover:underline">Set goals →</Link>
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-2.5 text-sm">
+              {tracked.map((s) => {
+                const pct = s.daysLogged > 0 ? (s.daysMet / s.daysLogged) * 100 : 0
+                return (
+                  <li key={s.goal.nutrient}>
+                    <div className="flex justify-between gap-3">
+                      <span className="capitalize text-gray-800">{goalLabel(s.goal)}</span>
+                      <span className="shrink-0 text-xs text-gray-500">
+                        {s.daysMet} of {s.daysLogged} logged days
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100">
+                      <div className="h-full rounded-full bg-green-500" style={{ width: `${pct}%` }} />
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
+      </div>
+    </div>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
-export default function SummaryPage() {
+function SummaryPageInner() {
+  const searchParams = useSearchParams()
+  const appointmentMode = searchParams.get('mode') === 'appointment'
   const dayKeys = useMemo(() => lastNDateKeys(7), [])
   const [logs, setLogs] = useState<SummaryLog[]>([])
   const [goals, setGoals] = useState<SummaryGoal[]>([])
@@ -236,18 +337,60 @@ export default function SummaryPage() {
   const calorieGoal = goals.find((g) => g.nutrient.toLowerCase() === 'calories')
   const targetKcal = profile?.caloricGoalKcal ?? calorieGoal?.targetMin ?? calorieGoal?.targetMax ?? null
 
+  const allLogs = useMemo(() => week.days.flatMap((d) => d.logs), [week])
+  const foods = useMemo(() => foodFrequency(allLogs), [allLogs])
+  const topics = useMemo(() => {
+    const allergens = profile?.allergens ?? []
+    return suggestTopics({
+      week,
+      goals: shownGoals,
+      careTeamFlags: profile?.careTeamFlags ?? [],
+      medications: profile?.medications ?? [],
+      allergenFlaggedFoods: allLogs
+        .filter((l) => matchAllergens(l.foodName, allergens).length > 0)
+        .map((l) => l.foodName),
+    })
+  }, [week, shownGoals, profile, allLogs])
+
   const report = useMemo(
-    () => buildWeeklyReport(week, shownGoals, { hideCalories, generatedAt: new Date() }),
-    [week, shownGoals, hideCalories]
+    () =>
+      buildWeeklyReport(week, shownGoals, {
+        hideCalories,
+        generatedAt: new Date(),
+        appointment: appointmentMode
+          ? { foods, topics, careTeamFlags: profile?.careTeamFlags ?? [] }
+          : undefined,
+      }),
+    [week, shownGoals, hideCalories, appointmentMode, foods, topics, profile]
   )
 
   return (
     <div className="max-w-3xl space-y-6">
       <div className="print:hidden">
-        <h1 className="text-2xl font-bold text-gray-900">Weekly Summary</h1>
+        <h1 className="text-2xl font-bold text-gray-900">
+          {appointmentMode ? 'Prepare for your appointment' : 'Weekly Summary'}
+        </h1>
         <p className="mt-1 text-sm text-gray-500">
           {formatDayKey(dayKeys[0])} – {formatDayKey(dayKeys[dayKeys.length - 1])} · numbers from USDA FoodData Central
         </p>
+        <div className="mt-4 inline-flex rounded-lg border border-gray-200 bg-white p-0.5 text-sm" role="tablist">
+          <Link
+            href="/summary"
+            role="tab"
+            aria-selected={!appointmentMode}
+            className={`rounded-md px-3 py-1.5 ${!appointmentMode ? 'bg-blue-600 text-white' : 'text-gray-600 hover:text-gray-900'}`}
+          >
+            This week
+          </Link>
+          <Link
+            href="/summary?mode=appointment"
+            role="tab"
+            aria-selected={appointmentMode}
+            className={`rounded-md px-3 py-1.5 ${appointmentMode ? 'bg-blue-600 text-white' : 'text-gray-600 hover:text-gray-900'}`}
+          >
+            Appointment prep
+          </Link>
+        </div>
       </div>
 
       {loading && <p className="text-sm text-gray-500">Loading your week…</p>}
@@ -262,34 +405,61 @@ export default function SummaryPage() {
             </div>
           )}
 
-          <section className="rounded-lg border border-gray-200 bg-white p-4 print:hidden">
-            <div className="mb-4 flex items-baseline justify-between gap-2">
-              <h2 className="text-sm font-semibold text-gray-900">
-                {hideCalories ? 'Foods logged per day' : 'Calories logged per day'}
-              </h2>
-              <span className="text-xs text-gray-500">
-                {week.daysLogged} of 7 days logged
-              </span>
-            </div>
-            <WeekBarChart days={week.days} hideCalories={hideCalories} targetKcal={targetKcal} />
-          </section>
+          {appointmentMode && (
+            <AppointmentPrep
+              week={week}
+              foods={foods}
+              topics={topics}
+              careTeamFlags={profile?.careTeamFlags ?? []}
+            />
+          )}
 
-          <section className="rounded-lg border border-gray-200 bg-white p-4 print:hidden">
-            <h2 className="mb-3 text-sm font-semibold text-gray-900">Goals by day</h2>
-            <GoalsGrid days={week.days} goals={shownGoals} />
-          </section>
+          {!appointmentMode && (
+            <>
+              <section className="rounded-lg border border-gray-200 bg-white p-4 print:hidden">
+                <div className="mb-4 flex items-baseline justify-between gap-2">
+                  <h2 className="text-sm font-semibold text-gray-900">
+                    {hideCalories ? 'Foods logged per day' : 'Calories logged per day'}
+                  </h2>
+                  <span className="text-xs text-gray-500">
+                    {week.daysLogged} of 7 days logged
+                  </span>
+                </div>
+                <WeekBarChart days={week.days} hideCalories={hideCalories} targetKcal={targetKcal} />
+              </section>
+
+              <section className="rounded-lg border border-gray-200 bg-white p-4 print:hidden">
+                <h2 className="mb-3 text-sm font-semibold text-gray-900">Goals by day</h2>
+                <GoalsGrid days={week.days} goals={shownGoals} />
+              </section>
+            </>
+          )}
 
           <section className="space-y-2">
             <div className="print:hidden">
               <h2 className="text-sm font-semibold text-gray-900">Share with your dietitian</h2>
               <p className="text-xs text-gray-500">
-                A plain-text copy of this week&apos;s food log and nutrient averages. Copy it, download it, or print it.
+                {appointmentMode
+                  ? 'A plain-text appointment summary: topics, what you ate, goals met, and the full food log.'
+                  : "A plain-text copy of this week's food log and nutrient averages."}{' '}
+                Copy it, download it, or print it.
               </p>
             </div>
-            <ReportExport text={report} filename={`nutripath-week-${dayKeys[dayKeys.length - 1]}.txt`} />
+            <ReportExport
+              text={report}
+              filename={`nutripath-${appointmentMode ? 'appointment' : 'week'}-${dayKeys[dayKeys.length - 1]}.txt`}
+            />
           </section>
         </>
       )}
     </div>
+  )
+}
+
+export default function SummaryPage() {
+  return (
+    <Suspense fallback={<p className="text-sm text-gray-500">Loading…</p>}>
+      <SummaryPageInner />
+    </Suspense>
   )
 }
