@@ -12,6 +12,7 @@ import { useSearchParams } from 'next/navigation'
 import type { USDAFoodSummary } from '@/types/usda'
 import type { NutrientTarget } from '@/types/goals'
 import { matchAllergens } from '@/lib/safety/allergens'
+import { localDateKey, lastNDateKeys, logRangeQuery } from '@/lib/dates'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,10 +42,6 @@ interface ProfileData {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10)
-}
 
 /** Sum a nutrient across all logged entries for the day. */
 function sumNutrient(logs: FoodLogEntry[], name: string): number {
@@ -138,7 +135,7 @@ function LogFoodTab({
   const loadLogs = useCallback(async () => {
     setLogsLoading(true)
     try {
-      const res = await fetch(`/api/log?date=${todayISO()}`)
+      const res = await fetch(`/api/log?${logRangeQuery(localDateKey())}`)
       if (res.ok) {
         const data = await res.json()
         setLogs(data.logs ?? [])
@@ -427,11 +424,12 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
   useEffect(() => {
     async function load() {
       setLoading(true)
+      const weekKeys = lastNDateKeys(7) // last 7 local days, including today
       try {
         const [goalsRes, logsRes, weekRes] = await Promise.all([
           fetch('/api/goals'),
-          fetch(`/api/log?date=${todayISO()}`),
-          fetch('/api/log?days=7'),
+          fetch(`/api/log?${logRangeQuery(localDateKey())}`),
+          fetch(`/api/log?${logRangeQuery(weekKeys[0], weekKeys[weekKeys.length - 1])}`),
         ])
         if (goalsRes.ok) {
           const d = await goalsRes.json()
@@ -447,7 +445,7 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
           // Group by day and count days where total calories < 1200
           const byDay: Record<string, FoodLogEntry[]> = {}
           for (const entry of weekLogs) {
-            const day = entry.loggedAt.slice(0, 10)
+            const day = localDateKey(new Date(entry.loggedAt)) // local day, not UTC
             if (!byDay[day]) byDay[day] = []
             byDay[day].push(entry)
           }
