@@ -170,6 +170,8 @@ function NavButtons({
   continueLabel,
   continueDisabled,
   loading,
+  incomplete,
+  incompleteMessage,
 }: {
   step: number
   onBack: () => void
@@ -177,28 +179,58 @@ function NavButtons({
   continueLabel?: string
   continueDisabled?: boolean
   loading?: boolean
+  /** If set, clicking Continue shows this warning + a "Skip anyway" link before advancing */
+  incomplete?: boolean
+  incompleteMessage?: string
 }) {
+  const [warned, setWarned] = useState(false)
+
+  function handleContinue() {
+    if (incomplete && !warned) {
+      setWarned(true)
+      return
+    }
+    setWarned(false)
+    onContinue()
+  }
+
   return (
-    <div className="mt-8 flex items-center justify-between">
-      {step > 1 ? (
+    <div className="mt-8">
+      {warned && incomplete && (
+        <div className="mb-3 flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-xs text-amber-700">
+            <strong>Heads up:</strong> {incompleteMessage ?? 'Please finish this step before continuing.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => { setWarned(false); onContinue() }}
+            className="shrink-0 text-xs text-amber-600 underline hover:text-amber-800 whitespace-nowrap"
+          >
+            Skip anyway
+          </button>
+        </div>
+      )}
+      <div className="flex items-center justify-between">
+        {step > 1 ? (
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Back
+          </button>
+        ) : (
+          <span />
+        )}
         <button
           type="button"
-          onClick={onBack}
-          className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          onClick={handleContinue}
+          disabled={continueDisabled || loading}
+          className="rounded-md bg-green-600 px-5 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-40"
         >
-          Back
+          {loading ? 'Saving…' : (continueLabel ?? 'Continue')}
         </button>
-      ) : (
-        <span />
-      )}
-      <button
-        type="button"
-        onClick={onContinue}
-        disabled={continueDisabled || loading}
-        className="rounded-md bg-green-600 px-5 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-40"
-      >
-        {loading ? 'Saving…' : (continueLabel ?? 'Continue')}
-      </button>
+      </div>
     </div>
   )
 }
@@ -511,7 +543,9 @@ function BodyMetricsStep({
         step={stepNum}
         onBack={onBack}
         onContinue={onContinue}
-        continueLabel={metricsComplete(profile) ? 'Calculate my goal' : 'Skip for now'}
+        continueLabel="Continue"
+        incomplete={!metricsComplete(profile)}
+        incompleteMessage="Please fill in height, weight, age, sex, and activity level so we can calculate your calorie goal. You can skip if you'd prefer to set a target manually."
       />
     </div>
   )
@@ -1394,7 +1428,13 @@ export default function ProfileWizard({
             </div>
             <p className="text-xs text-gray-400 -mt-2">Used to find nearby farmers markets and local dietitians.</p>
           </div>
-          <NavButtons step={2} onBack={goBack} onContinue={goNext} />
+          <NavButtons
+            step={2}
+            onBack={goBack}
+            onContinue={goNext}
+            incomplete={!profile.budget || !profile.schedule}
+            incompleteMessage="Please select your food budget and cooking time before continuing."
+          />
         </div>
       )}
 
