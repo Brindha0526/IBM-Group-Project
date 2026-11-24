@@ -69,8 +69,54 @@ const ALLERGEN_EXCLUSIONS: Partial<Record<FdaAllergen, string[]>> = {
   ],
 }
 
+// ─── Custom allergies ─────────────────────────────────────────────────────────
+// Users can add allergies beyond the FDA major 9 (e.g. mustard, kiwi, celery).
+// They are stored alongside the FDA values in Profile.allergens (lowercased) and
+// matched against any word starting with the name or its singular form.
+
+/** Lowercase, trim and collapse whitespace. */
+export function normalizeAllergen(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+export function isFdaAllergen(a: string): a is FdaAllergen {
+  return (FDA_MAJOR_9 as readonly string[]).includes(normalizeAllergen(a))
+}
+
+/** Allergens the user typed in themselves (not one of the FDA major 9). */
+export function customAllergens(allergens: string[]): string[] {
+  return allergens.filter((a) => !isFdaAllergen(a))
+}
+
+/**
+ * Replaces the custom part of `allergens` with `custom`, keeping the FDA
+ * selections. Custom entries are normalised and de-duplicated; one that names
+ * an FDA allergen (e.g. "Peanuts") is stored as that FDA value.
+ */
+export function withCustomAllergens(allergens: string[], custom: string[]): string[] {
+  const result = allergens.filter(isFdaAllergen).map(normalizeAllergen)
+  for (const raw of custom) {
+    const a = normalizeAllergen(raw)
+    if (a && !result.includes(a)) result.push(a)
+  }
+  return result
+}
+
+/** Keywords for an allergen not in the FDA map: its own name, plus a singular form. */
+function customKeywords(name: string): string[] {
+  const kws = [name]
+  if (name.endsWith('ies') && name.length > 4) kws.push(name.slice(0, -3) + 'y')
+  else if (name.endsWith('es') && name.length > 3) kws.push(name.slice(0, -2), name.slice(0, -1))
+  else if (name.endsWith('s') && name.length > 3) kws.push(name.slice(0, -1))
+  return kws
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function wordPrefixRegex(keyword: string): RegExp {
+  return new RegExp(`\\b${escapeRegExp(keyword)}`, 'i')
 }
 
 function keywordRegex(keyword: string): RegExp {
@@ -79,19 +125,23 @@ function keywordRegex(keyword: string): RegExp {
 
 /**
  * Returns the allergens (from the given list) that appear in `text`, using the
- * keyword map. Allergens not in the FDA major-9 map fall back to matching their
- * own name. Case-insensitive.
+ * keyword map. Custom allergens (not in the FDA major-9 map) match their own
+ * name, singular or plural. Case-insensitive.
  */
 export function matchAllergens(text: string, allergens: string[]): string[] {
   const lower = text.toLowerCase()
   return allergens.filter((allergen) => {
-    const key = allergen.toLowerCase() as FdaAllergen
-    const keywords = ALLERGEN_KEYWORDS[key] ?? [key]
+    const key = normalizeAllergen(allergen) as FdaAllergen
+    if (!key) return false
+    const known = ALLERGEN_KEYWORDS[key]
     let haystack = lower
     for (const phrase of ALLERGEN_EXCLUSIONS[key] ?? []) {
       haystack = haystack.split(phrase).join(' ')
     }
-    return keywords.some((kw) => keywordRegex(kw).test(haystack))
+    if (known) return known.some((kw) => keywordRegex(kw).test(haystack))
+    // Custom allergy: match any word that STARTS with the name (or its singular),
+    // so "kiwi" also flags "Kiwifruit". Over-flagging is safer than missing it.
+    return customKeywords(key).some((kw) => wordPrefixRegex(kw).test(haystack))
   })
 }
 

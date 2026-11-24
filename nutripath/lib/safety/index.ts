@@ -3,7 +3,14 @@ import { checkAllergens } from './allergens'
 import { checkMedications } from './medications'
 import { checkMissingData } from './missing-data'
 
-export { checkAllergens, matchAllergens, ALLERGEN_KEYWORDS } from './allergens'
+export {
+  checkAllergens,
+  matchAllergens,
+  ALLERGEN_KEYWORDS,
+  normalizeAllergen,
+  customAllergens,
+  withCustomAllergens,
+} from './allergens'
 export { checkMedications } from './medications'
 export { checkCalorieFloor, CALORIE_FLOOR } from './calorie-floor'
 export { checkSensitiveConditions } from './sensitive-conditions'

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { checkAllergens, matchAllergens } from '@/lib/safety/allergens'
+import { checkAllergens, matchAllergens, customAllergens, withCustomAllergens } from '@/lib/safety/allergens'
 import type { FoodInput, ProfileInput } from '@/types/safety'
 
 const baseProfile: ProfileInput = {
@@ -132,5 +132,37 @@ describe('matchAllergens (keyword map)', () => {
     )
     expect(result.level).toBe('block')
     expect(result.warnings).toHaveLength(2)
+  })
+})
+
+describe('custom allergies', () => {
+  it('matches a custom allergy at the start of any word, singular or plural', () => {
+    expect(matchAllergens('Mustard, prepared, yellow', ['mustard'])).toEqual(['mustard'])
+    expect(matchAllergens('Kiwifruit, green, raw', ['kiwi'])).toEqual(['kiwi'])
+    expect(matchAllergens('Kiwi, raw', ['kiwis'])).toEqual(['kiwis'])
+    expect(matchAllergens('Strawberry yogurt', ['strawberries'])).toEqual(['strawberries'])
+    expect(matchAllergens('Tomatoes, red, ripe', ['tomato'])).toEqual(['tomato'])
+    expect(matchAllergens('Potatoes, baked', ['tomato'])).toEqual([])
+    expect(matchAllergens('Celery, raw', ['  Celery '])).toEqual(['  Celery '])
+  })
+
+  it('checkAllergens blocks custom allergies in ingredients', () => {
+    const r = checkAllergens(
+      { ...baseFood, ingredients: ['vinegar', 'mustard seed'] },
+      { ...baseProfile, allergens: ['mustard'] }
+    )
+    expect(r.level).toBe('block')
+  })
+
+  it('customAllergens returns only non-FDA entries', () => {
+    expect(customAllergens(['milk', 'mustard', 'Tree Nuts', 'kiwi'])).toEqual(['mustard', 'kiwi'])
+  })
+
+  it('withCustomAllergens keeps FDA picks, normalises and de-duplicates custom ones', () => {
+    expect(withCustomAllergens(['milk', 'old custom'], ['  Mustard ', 'mustard', 'Kiwi'])).toEqual(['milk', 'mustard', 'kiwi'])
+    // typing an FDA allergen stores the FDA value once
+    expect(withCustomAllergens(['peanuts'], ['Peanuts', 'sesame'])).toEqual(['peanuts', 'sesame'])
+    expect(withCustomAllergens(['eggs', 'kiwi'], [])).toEqual(['eggs'])
+    expect(withCustomAllergens([], ['', '   '])).toEqual([])
   })
 })

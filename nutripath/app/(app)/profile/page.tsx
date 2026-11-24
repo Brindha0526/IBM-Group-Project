@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import TagInput from '@/components/TagInput'
 import { GoalList } from '@/components/GoalsEditor'
+import { customAllergens, withCustomAllergens } from '@/lib/safety/allergens'
 import type { NutrientTarget } from '@/types/goals'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -322,6 +323,15 @@ export default function ProfilePage() {
                 <span className="text-sm text-gray-700">{label}</span>
               </label>
             ))}
+            <div className="pt-2">
+              <TagInput
+                label="Other allergies or intolerances"
+                hint="Type one and press Enter — e.g. mustard, kiwi, celery."
+                tags={customAllergens(draft?.allergens ?? [])}
+                onChange={(custom) => updateDraft({ allergens: withCustomAllergens(draft?.allergens ?? [], custom) })}
+                placeholder="e.g. mustard"
+              />
+            </div>
           </div>
         )}
       </EditSection>

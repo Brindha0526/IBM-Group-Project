@@ -5,18 +5,7 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { createClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
-
-const allergenValues = [
-  'milk',
-  'eggs',
-  'fish',
-  'crustacean shellfish',
-  'tree nuts',
-  'peanuts',
-  'wheat',
-  'soybeans',
-  'sesame',
-] as const
+import { withCustomAllergens } from '@/lib/safety/allergens'
 
 const careTeamFlagValues = [
   'LOW_IRON',
@@ -34,7 +23,12 @@ const profileSchema = z.object({
   cuisines: z.array(z.string()).default([]),
   religiousRules: z.array(z.string()).default([]),
   preferences: z.array(z.string()).default([]),
-  allergens: z.array(z.enum(allergenValues)).default([]),
+  // FDA major-9 values plus any custom allergies the user typed (e.g. "mustard").
+  allergens: z
+    .array(z.string().trim().min(1).max(60))
+    .max(30)
+    .default([])
+    .transform((list) => withCustomAllergens(list, list)),
   medications: z.array(z.string()).default([]),
   medicalHistory: z.string().optional(),
   careTeamFlags: z.array(z.enum(careTeamFlagValues)).default([]),

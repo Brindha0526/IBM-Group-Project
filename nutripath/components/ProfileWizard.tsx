@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react'
 import TagInput from '@/components/TagInput'
+import { customAllergens, withCustomAllergens } from '@/lib/safety/allergens'
 import { deriveGoals, suggestGoalsFromHistory, calcCaloricTarget } from '@/lib/goals'
 import type { NutrientTarget, SuggestedGoal } from '@/types/goals'
 import type { GoalIntensity } from '@/lib/goals'
@@ -1547,7 +1548,16 @@ export default function ProfileWizard({
               </label>
             ))}
           </div>
-          <p className="mt-4 text-xs text-gray-400">We'll make sure none of your plans or suggestions include these.</p>
+          <div className="mt-5">
+            <TagInput
+              label="Any other allergies or intolerances?"
+              hint="Type one and press Enter — e.g. mustard, kiwi, celery. We'll flag foods whose names mention it."
+              tags={customAllergens(profile.allergens)}
+              onChange={(custom) => update({ allergens: withCustomAllergens(profile.allergens, custom) })}
+              placeholder="e.g. mustard"
+            />
+          </div>
+          <p className="mt-4 text-xs text-gray-400">We'll make sure none of your plans or suggestions include these. Food data doesn't always list every ingredient, so please still check labels.</p>
           <NavButtons step={allergensStep} onBack={goBack} onContinue={goNext} />
         </div>
       )}

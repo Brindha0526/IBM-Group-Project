@@ -19,6 +19,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
+import { customAllergens, matchAllergens } from '@/lib/safety/allergens'
 import { SEED_FOODS } from '@/data/seed-foods'
 import type { SeedFood } from '@/types/foods'
 
@@ -54,11 +55,15 @@ export async function GET(request: Request) {
         )
 
         if (userAllergens.length > 0) {
+          // Custom allergies (e.g. "kiwi") aren't in the seed allergenFlags,
+          // so also match them against the food name.
+          const custom = customAllergens(userAllergens)
           foods = foods.filter((food) => {
             // Block if any allergenFlag matches any user allergen
-            return !food.allergenFlags.some((flag) =>
+            const flagged = food.allergenFlags.some((flag) =>
               userAllergens.some((ua) => flag.toLowerCase().includes(ua))
             )
+            return !flagged && matchAllergens(food.name, custom).length === 0
           })
         }
       }
