@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { createClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
 import { getFoodDetail, searchFoods } from '@/lib/usda'
-import { runSafetyRules } from '@/lib/safety'
+import { runSafetyRules, matchAllergens } from '@/lib/safety'
 import type { FoodInput, ProfileInput } from '@/types/safety'
 
 // ---------------------------------------------------------------------------
@@ -171,6 +171,18 @@ export async function POST(request: Request) {
 
   // 7. Run safety rules
   const result = runSafetyRules(foodInput, profileInput)
+
+  // 7b. Allergen check on the food name. USDA SR Legacy / Foundation foods have
+  //     no ingredient list, so checkAllergens above can't see them. The log
+  //     records what the user already ate, so a match is a warning (shown on
+  //     the log row), not a block. Blocking still applies to meal-plan suggestions.
+  const nameAllergens = matchAllergens(foodName, profileInput.allergens)
+  if (nameAllergens.length > 0) {
+    result.warnings.push(
+      `${foodName} may contain ${nameAllergens.join(', ')}, which is on your allergen list.`
+    )
+    if (result.level === 'ok') result.level = 'warn'
+  }
 
   // 8. Block if safety level is 'block'
   if (result.level === 'block') {

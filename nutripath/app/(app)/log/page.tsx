@@ -11,6 +11,7 @@ import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import type { USDAFoodSummary } from '@/types/usda'
 import type { NutrientTarget } from '@/types/goals'
+import { matchAllergens } from '@/lib/safety/allergens'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,6 +35,7 @@ interface SavedGoal extends NutrientTarget {
 interface ProfileData {
   hideCalories: boolean
   hasEdHistory: boolean
+  allergens: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -109,11 +111,13 @@ function ErrorCard({ message }: { message: string }) {
 
 function LogFoodTab({
   hideCalories,
+  allergens,
   onLogged,
   prefillFdcId,
   prefillName,
 }: {
   hideCalories: boolean
+  allergens: string[]
   onLogged: () => void
   prefillFdcId?: string
   prefillName?: string
@@ -349,6 +353,7 @@ function LogFoodTab({
 
             {logs.map((log) => {
               const kcal = extractCalories(log.nutrients)
+              const flaggedAllergens = matchAllergens(log.foodName, allergens)
               // Show a few key nutrients
               const keyNutrients: { name: string; value: number; unit: string }[] = []
               const nutrientPriority = [
@@ -367,24 +372,28 @@ function LogFoodTab({
               }
 
               return (
-                <div
-                  key={log.id}
-                  className={`grid items-start px-3 py-2 text-sm ${hideCalories ? 'grid-cols-3' : 'grid-cols-4'}`}
-                >
-                  <span className="font-medium text-gray-900 truncate pr-2">
-                    {log.foodName}
-                  </span>
-                  <span className="text-gray-600">{log.servingG}g</span>
-                  {!hideCalories && (
-                    <span className="text-gray-600">
-                      {kcal !== null ? `${Math.round(kcal)} kcal` : '—'}
+                <div key={log.id} className="px-3 py-2 text-sm">
+                  <div className={`grid items-start ${hideCalories ? 'grid-cols-3' : 'grid-cols-4'}`}>
+                    <span className="font-medium text-gray-900 truncate pr-2">
+                      {log.foodName}
                     </span>
+                    <span className="text-gray-600">{log.servingG}g</span>
+                    {!hideCalories && (
+                      <span className="text-gray-600">
+                        {kcal !== null ? `${Math.round(kcal)} kcal` : '—'}
+                      </span>
+                    )}
+                    <span className="text-gray-500 text-xs leading-5">
+                      {keyNutrients.length > 0
+                        ? keyNutrients.map((n) => `${n.name}: ${n.value.toFixed(1)}`).join(' · ')
+                        : '—'}
+                    </span>
+                  </div>
+                  {flaggedAllergens.length > 0 && (
+                    <p className="mt-1 inline-flex items-center gap-1 rounded bg-amber-50 border border-amber-200 px-2 py-0.5 text-xs text-amber-800">
+                      ⚠ May contain {flaggedAllergens.join(', ')}, which is on your allergen list
+                    </p>
                   )}
-                  <span className="text-gray-500 text-xs leading-5">
-                    {keyNutrients.length > 0
-                      ? keyNutrients.map((n) => `${n.name}: ${n.value.toFixed(1)}`).join(' · ')
-                      : '—'}
-                  </span>
                 </div>
               )
             })}
@@ -556,6 +565,7 @@ function LogPageInner() {
           setProfile({
             hideCalories: d.profile.hideCalories ?? false,
             hasEdHistory: d.profile.hasEdHistory ?? false,
+            allergens: Array.isArray(d.profile.allergens) ? d.profile.allergens : [],
           })
         }
       })
@@ -564,6 +574,7 @@ function LogPageInner() {
 
   // Hide calories if the user set the toggle OR disclosed an ED history
   const hideCalories = (profile?.hideCalories ?? false) || (profile?.hasEdHistory ?? false)
+  const allergens = profile?.allergens ?? []
 
   function handleLogged() {
     // Bump the check-in tab so its data refreshes when user switches to it
@@ -605,6 +616,7 @@ function LogPageInner() {
       {tab === 'log' && (
         <LogFoodTab
           hideCalories={hideCalories}
+          allergens={allergens}
           onLogged={handleLogged}
           prefillFdcId={prefillFdcId}
           prefillName={prefillName}

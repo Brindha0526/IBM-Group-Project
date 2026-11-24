@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { checkAllergens } from '@/lib/safety/allergens'
+import { checkAllergens, matchAllergens } from '@/lib/safety/allergens'
 import type { FoodInput, ProfileInput } from '@/types/safety'
 
 const baseProfile: ProfileInput = {
@@ -78,5 +78,59 @@ describe('checkAllergens', () => {
       { ...baseProfile, allergens: ['peanuts'] }
     )
     expect(result.level).toBe('block')
+  })
+})
+
+describe('matchAllergens (keyword map)', () => {
+  it('matches USDA-style names that the plain allergen word would miss', () => {
+    expect(matchAllergens('Egg, whole, raw, fresh', ['eggs'])).toEqual(['eggs'])
+    expect(matchAllergens('Peanut butter, smooth style', ['peanuts'])).toEqual(['peanuts'])
+    expect(matchAllergens('Nuts, almonds', ['tree nuts'])).toEqual(['tree nuts'])
+    expect(matchAllergens('Crustaceans, shrimp, cooked', ['crustacean shellfish'])).toEqual(['crustacean shellfish'])
+    expect(matchAllergens('Tofu, firm, prepared with calcium sulfate', ['soybeans'])).toEqual(['soybeans'])
+    expect(matchAllergens('Cheese, cheddar', ['milk'])).toEqual(['milk'])
+    expect(matchAllergens('Bread, whole-wheat, commercially prepared', ['wheat'])).toEqual(['wheat'])
+    expect(matchAllergens('Seeds, sesame butter, tahini', ['sesame'])).toEqual(['sesame'])
+    expect(matchAllergens('Fish, salmon, Atlantic, farmed', ['fish'])).toEqual(['fish'])
+  })
+
+  it('is case-insensitive', () => {
+    expect(matchAllergens('SHRIMP COCKTAIL', ['crustacean shellfish'])).toHaveLength(1)
+  })
+
+  it('returns every matching allergen', () => {
+    expect(matchAllergens('Egg sandwich on wheat bread with cheese', ['milk', 'eggs', 'wheat', 'fish']))
+      .toEqual(['milk', 'eggs', 'wheat'])
+  })
+
+  it('uses whole-word matching to avoid obvious false positives', () => {
+    expect(matchAllergens('Eggplant, raw', ['eggs'])).toEqual([])
+    expect(matchAllergens('Shellfish, mixed', ['fish'])).toEqual([])
+    expect(matchAllergens('Squash, butternut, raw', ['milk'])).toEqual([])
+  })
+
+  it('does not flag plant milks/nut butters as dairy, but still flags the nut/soy', () => {
+    expect(matchAllergens('Almond milk, unsweetened', ['milk', 'tree nuts'])).toEqual(['tree nuts'])
+    expect(matchAllergens('Soy milk, original', ['milk', 'soybeans'])).toEqual(['soybeans'])
+    expect(matchAllergens('Peanut butter', ['milk', 'peanuts'])).toEqual(['peanuts'])
+  })
+
+  it('does not flag gluten-free flours as wheat', () => {
+    expect(matchAllergens('Rice flour, white', ['wheat'])).toEqual([])
+    expect(matchAllergens('Buckwheat groats', ['wheat'])).toEqual([])
+  })
+
+  it('returns nothing for an empty allergen list or unrelated food', () => {
+    expect(matchAllergens('Peanut butter', [])).toEqual([])
+    expect(matchAllergens('Rice, white, cooked', ['milk', 'eggs', 'wheat'])).toEqual([])
+  })
+
+  it('checkAllergens blocks keyword matches in ingredients', () => {
+    const result = checkAllergens(
+      { ...baseFood, name: 'pad thai', ingredients: ['rice noodles', 'shrimp', 'crushed peanuts'] },
+      { ...baseProfile, allergens: ['crustacean shellfish', 'peanuts'] }
+    )
+    expect(result.level).toBe('block')
+    expect(result.warnings).toHaveLength(2)
   })
 })
