@@ -30,7 +30,7 @@ export default function NavBar() {
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/')
 
   return (
-    <header className="bg-white border-b border-gray-200">
+    <header className="bg-white border-b border-gray-200 print:hidden">
       <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
         <Link href="/profile" className="text-lg font-bold text-blue-700 hover:text-blue-800 shrink-0">
           NutriPath

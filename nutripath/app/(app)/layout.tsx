@@ -44,7 +44,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       </main>
 
       {/* Footer — "Not medical advice" required by GUIDELINES §Safety rules rule 9 */}
-      <footer className="border-t border-gray-200 bg-white">
+      <footer className="border-t border-gray-200 bg-white print:hidden">
         <div className="max-w-5xl mx-auto px-4 py-4 text-center text-sm text-gray-500">
           Not medical advice. Always consult your healthcare team.
         </div>

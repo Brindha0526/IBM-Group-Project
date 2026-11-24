@@ -14,6 +14,7 @@ import type { NutrientTarget } from '@/types/goals'
 import { matchAllergens } from '@/lib/safety/allergens'
 import { localDateKey, lastNDateKeys, logRangeQuery } from '@/lib/dates'
 import { loadMealPrefill, clearMealPrefill, type MealPrefill } from '@/lib/meal-prefill'
+import { nutrientTotal } from '@/lib/summary'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,14 +44,6 @@ interface ProfileData {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Sum a nutrient across all logged entries for the day. */
-function sumNutrient(logs: FoodLogEntry[], name: string): number {
-  return logs.reduce((acc, l) => {
-    const val = l.nutrients[name]
-    return acc + (typeof val === 'number' ? val : 0)
-  }, 0)
-}
 
 /** Find calories from the nutrient map (key contains "Energy", kcal). */
 function extractCalories(nutrients: Record<string, number>): number | null {
@@ -673,19 +666,8 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
             Nutrient totals from USDA FoodData Central
           </p>
           {visibleGoals.map((goal) => {
-            const nutrientKey = goal.nutrient
-            // Try to match by exact key or by partial match
-            let total = 0
-            const exactMatch = Object.entries(
-              logs.reduce((acc, l) => {
-                for (const [k, v] of Object.entries(l.nutrients)) {
-                  acc[k] = (acc[k] ?? 0) + v
-                }
-                return acc
-              }, {} as Record<string, number>)
-            ).find(([k]) => k.toLowerCase().includes(nutrientKey.toLowerCase()))
-            if (exactMatch) total = exactMatch[1]
-            else total = sumNutrient(logs, nutrientKey)
+            // Shared matcher: handles USDA naming (e.g. "Vitamin B-12", "Fatty acids, total saturated")
+            const total = nutrientTotal(logs, goal.nutrient) ?? 0
 
             const target = goal.targetMin ?? goal.targetMax ?? null
             const hasMax = goal.targetMax !== undefined && goal.targetMax !== null
