@@ -41,6 +41,18 @@ model Profile {
   takesInsulin     Boolean        @default(false)
   hasEdHistory     Boolean        @default(false)
   hideCalories     Boolean        @default(false)
+  // Location — used for dietitian search and grocery store finder
+  zipCode          String?        // e.g. "10001" or "SW1A 1AA"
+  country          String?        // ISO-3166-1 alpha-2, e.g. "US", "GB"
+  // Body metrics — used for BMI + caloric target calculation
+  heightCm         Float?         // user-entered height in centimetres
+  weightKg         Float?         // user-entered weight in kilograms
+  age              Int?           // user-entered age in years
+  sex              Sex?           // MALE | FEMALE | OTHER (affects Mifflin-St Jeor constant)
+  activityLevel    ActivityLevel? // sedentary → extra_active
+  weightGoal       WeightGoal?    // LOSE | MAINTAIN | GAIN
+  goalIntensity    GoalIntensity? // intensity of cut/bulk: MODERATE|AGGRESSIVE (cut) or LEAN|STANDARD|AGGRESSIVE (bulk)
+  caloricGoalKcal  Int?           // final kcal/day target (user-confirmed or overridden)
 }
 
 model Goal {
@@ -71,6 +83,33 @@ model FoodLog {
 enum Path {
   BEFORE
   AFTER
+}
+
+enum Sex {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum ActivityLevel {
+  SEDENTARY
+  LIGHTLY_ACTIVE
+  MODERATELY_ACTIVE
+  VERY_ACTIVE
+  EXTRA_ACTIVE
+}
+
+enum WeightGoal {
+  LOSE
+  MAINTAIN
+  GAIN
+}
+
+enum GoalIntensity {
+  MODERATE    // cut: −15% TDEE (~0.3–0.5 kg/week)
+  AGGRESSIVE  // cut: −25% TDEE (~0.5–0.8 kg/week) OR bulk: +20% TDEE
+  LEAN        // bulk: +10% TDEE (~0.1–0.2 kg/week)
+  STANDARD    // bulk: +15% TDEE (~0.2–0.3 kg/week)
 }
 
 enum GoalSource {

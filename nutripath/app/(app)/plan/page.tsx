@@ -134,46 +134,67 @@ function IngredientList({
 }
 
 function SaveToGroceryButton({ meal, dayLabel }: { meal: VerifiedMeal; dayLabel: string }) {
-  const [saved, setSaved] = useState(false)
+  // Combine verified + unverified — grocery list only needs names, not nutrition data.
+  const allIngredients = [
+    ...meal.ingredients.map((ing) => ({ name: ing.name, servingG: ing.servingG })),
+    ...meal.unverifiedIngredients.map((ing) => ({ name: ing.name, servingG: ing.servingG })),
+  ]
+
+  // Derive saved state directly from localStorage so it survives re-renders and
+  // collapses — the button stays green for the life of the page session.
+  function isSaved(): boolean {
+    try {
+      const existing = JSON.parse(
+        localStorage.getItem('nutripath_grocery_items') ?? '[]'
+      ) as Array<{ name: string; mealName: string; dayLabel: string }>
+      // A meal is "saved" if every one of its ingredients is already in the list
+      return allIngredients.length > 0 && allIngredients.every((ing) =>
+        existing.some((e) => e.name === ing.name && e.dayLabel === dayLabel)
+      )
+    } catch {
+      return false
+    }
+  }
+
+  const [saved, setSaved] = useState(() => isSaved())
 
   function handleSave() {
-    // Store ingredients to localStorage so the grocery page (ST-8) can consume them.
     const existing = JSON.parse(
       localStorage.getItem('nutripath_grocery_items') ?? '[]'
     ) as Array<{ name: string; servingG: number; mealName: string; dayLabel: string }>
 
-    const newItems = meal.ingredients.map((ing) => ({
+    const newItems = allIngredients.map((ing) => ({
       name: ing.name,
       servingG: ing.servingG,
       mealName: meal.name,
       dayLabel,
     }))
 
-    // Avoid duplicates by name+dayLabel
     const deduped = [
       ...existing.filter(
-        (e) =>
-          !newItems.some((n) => n.name === e.name && n.dayLabel === e.dayLabel)
+        (e) => !newItems.some((n) => n.name === e.name && n.dayLabel === e.dayLabel)
       ),
       ...newItems,
     ]
 
     localStorage.setItem('nutripath_grocery_items', JSON.stringify(deduped))
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    setSaved(true)   // stays true — no timeout reset
   }
+
+  if (allIngredients.length === 0) return null
 
   return (
     <button
       type="button"
       onClick={handleSave}
+      disabled={saved}
       className={`text-xs font-medium rounded px-3 py-1.5 transition-colors ${
         saved
-          ? 'bg-green-100 text-green-700 border border-green-200'
+          ? 'bg-green-100 text-green-700 border border-green-200 cursor-default'
           : 'bg-blue-600 text-white hover:bg-blue-700'
       }`}
     >
-      {saved ? '✓ Added to Grocery List' : 'Save to Grocery List'}
+      {saved ? '✓ In Grocery List' : 'Save to Grocery List'}
     </button>
   )
 }
@@ -204,14 +225,21 @@ function MealCard({
           <h4 className="text-sm font-semibold text-gray-900">{meal.name}</h4>
         </div>
         <div className="flex items-center gap-2">
-          {meal.hasWarnings && (
+          {/* Real safety warnings on verified ingredients (e.g. allergen interaction) */}
+          {meal.ingredients.some((i) => i.safetyLevel === 'warn') && (
             <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">
-              ⚠ Check notes
+              ⚠ Safety note
             </span>
           )}
-          {!meal.hasWarnings && meal.ingredients.length > 0 && (
+          {/* USDA lookup failures — data missing but not a safety concern */}
+          {meal.unverifiedIngredients.length > 0 && (
+            <span className="text-xs text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">
+              {meal.unverifiedIngredients.length} nutrition unknown
+            </span>
+          )}
+          {meal.unverifiedIngredients.length === 0 && meal.ingredients.length > 0 && !meal.ingredients.some((i) => i.safetyLevel === 'warn') && (
             <span className="text-xs text-green-700 bg-green-50 border border-green-200 rounded px-1.5 py-0.5">
-              ✓ Allergen-safe
+              ✓ All verified
             </span>
           )}
           <button
@@ -257,12 +285,10 @@ function MealCard({
             </p>
           )}
 
-          {/* Save to grocery */}
-          {meal.ingredients.length > 0 && (
-            <div className="flex justify-end">
-              <SaveToGroceryButton meal={meal} dayLabel={dayLabel} />
-            </div>
-          )}
+          {/* Save to grocery — always shown when there are any ingredients */}
+          <div className="flex justify-end">
+            <SaveToGroceryButton meal={meal} dayLabel={dayLabel} />
+          </div>
         </div>
       )}
     </div>

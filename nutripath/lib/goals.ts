@@ -469,3 +469,141 @@ export function suggestGoalsFromHistory(text: string): SuggestedGoal[] {
 
   return Array.from(accumulated.values())
 }
+
+// ---------------------------------------------------------------------------
+// calcCaloricTarget — Mifflin-St Jeor BMR + TDEE + weight-goal offset
+// ---------------------------------------------------------------------------
+// Sources:
+//   Mifflin MD et al. (1990) "A new predictive equation for resting energy
+//     expenditure in healthy individuals." Am J Clin Nutr 51(2):241-247.
+//   Dietary Guidelines for Americans 2020-2025 (dietaryguidelines.gov)
+//   NIH: https://www.nhlbi.nih.gov/health/educational/lose_wt/calstr.htm
+
+/**
+ * Intensity of a cut or bulk:
+ *  - LOSE:  MODERATE = ~15% deficit of TDEE (~0.4 kg/week)
+ *           AGGRESSIVE = ~25% deficit of TDEE (~0.7 kg/week)
+ *  - GAIN:  LEAN     = ~10% surplus of TDEE  (~0.2 kg/week)
+ *           STANDARD = ~15% surplus of TDEE  (~0.3 kg/week)
+ *           AGGRESSIVE = ~20% surplus of TDEE (~0.4 kg/week)
+ *  - MAINTAIN: intensity is ignored
+ *
+ * Using percentage-based adjustments is clinically more appropriate than
+ * flat offsets because relative deficits/surpluses scale with the person's
+ * actual energy expenditure.
+ */
+export type GoalIntensity =
+  | 'MODERATE'    // LOSE only
+  | 'AGGRESSIVE'  // LOSE only
+  | 'LEAN'        // GAIN only
+  | 'STANDARD'    // GAIN only
+
+export type CaloricInput = {
+  heightCm: number
+  weightKg: number
+  age: number
+  sex: 'MALE' | 'FEMALE' | 'OTHER'
+  activityLevel: 'SEDENTARY' | 'LIGHTLY_ACTIVE' | 'MODERATELY_ACTIVE' | 'VERY_ACTIVE' | 'EXTRA_ACTIVE'
+  weightGoal: 'LOSE' | 'MAINTAIN' | 'GAIN'
+  /** Intensity of the cut or bulk. Ignored when weightGoal = 'MAINTAIN'. */
+  intensity?: GoalIntensity
+}
+
+export type CaloricResult = {
+  bmi: number
+  bmiCategory: 'Underweight' | 'Healthy weight' | 'Overweight' | 'Obese'
+  bmr: number
+  tdee: number
+  /** Net caloric offset applied (kcal, negative = deficit, 0 = maintenance, positive = surplus) */
+  offset: number
+  targetKcal: number
+  rangeMin: number
+  rangeMax: number
+  safetyFloorApplied: boolean
+  /** Estimated weekly weight change in kg (negative = loss, positive = gain) */
+  weeklyRateKg: number
+}
+
+const ACTIVITY_MULTIPLIERS: Record<CaloricInput['activityLevel'], number> = {
+  SEDENTARY:          1.2,
+  LIGHTLY_ACTIVE:     1.375,
+  MODERATELY_ACTIVE:  1.55,
+  VERY_ACTIVE:        1.725,
+  EXTRA_ACTIVE:       1.9,
+}
+
+/**
+ * Returns the caloric offset for the given goal + intensity combination.
+ * Percentage-based so the adjustment scales with the individual's TDEE.
+ *
+ * Cut:   MODERATE  = −15% TDEE  (~0.4 kg/week)
+ *        AGGRESSIVE = −25% TDEE (~0.7 kg/week)
+ *
+ * Bulk:  LEAN      = +10% TDEE  (~0.2 kg/week)
+ *        STANDARD  = +15% TDEE  (~0.3 kg/week)
+ *        AGGRESSIVE = +20% TDEE (~0.4 kg/week)
+ *
+ * Maintain: 0
+ */
+function computeOffset(tdee: number, weightGoal: CaloricInput['weightGoal'], intensity?: GoalIntensity): number {
+  if (weightGoal === 'MAINTAIN') return 0
+  if (weightGoal === 'LOSE') {
+    const pct = intensity === 'AGGRESSIVE' ? 0.25 : 0.15
+    return -Math.round(tdee * pct)
+  }
+  // GAIN
+  const pct = intensity === 'AGGRESSIVE' ? 0.20 : intensity === 'LEAN' ? 0.10 : 0.15
+  return Math.round(tdee * pct)
+}
+
+/**
+ * Calculates a personalised caloric target using the Mifflin-St Jeor equation.
+ *
+ * BMR (kcal/day):
+ *   Male:   10 × kg + 6.25 × cm − 5 × age + 5
+ *   Female: 10 × kg + 6.25 × cm − 5 × age − 161
+ *   Other:  average of male and female constants
+ *
+ * TDEE = BMR × activity multiplier
+ * Target = TDEE + offset  (percentage-based deficit/surplus)
+ * Safety floor: 1 500 kcal (male) / 1 200 kcal (female/other)
+ */
+export function calcCaloricTarget(input: CaloricInput): CaloricResult {
+  const { heightCm, weightKg, age, sex, activityLevel, weightGoal, intensity } = input
+
+  // BMR — Mifflin-St Jeor
+  const base = 10 * weightKg + 6.25 * heightCm - 5 * age
+  const sexConstant =
+    sex === 'MALE' ? 5 : sex === 'FEMALE' ? -161 : (5 + -161) / 2 // OTHER = average
+  const bmr = Math.round(base + sexConstant)
+
+  // TDEE
+  const tdee = Math.round(bmr * ACTIVITY_MULTIPLIERS[activityLevel])
+
+  // Percentage-based offset
+  const offset = computeOffset(tdee, weightGoal, intensity)
+  const rawTarget = tdee + offset
+
+  // Safety floor (NIH / dietitian guidelines)
+  const safetyFloor = sex === 'MALE' ? 1500 : 1200
+  const safetyFloorApplied = rawTarget < safetyFloor
+  const targetKcal = Math.max(rawTarget, safetyFloor)
+
+  // ±10% display range (more meaningful than a flat ±100)
+  const rangeMin = Math.round(targetKcal * 0.90)
+  const rangeMax = Math.round(targetKcal * 1.10)
+
+  // BMI
+  const heightM = heightCm / 100
+  const bmi = Math.round((weightKg / (heightM * heightM)) * 10) / 10
+  const bmiCategory =
+    bmi < 18.5 ? 'Underweight'
+    : bmi < 25  ? 'Healthy weight'
+    : bmi < 30  ? 'Overweight'
+    :              'Obese'
+
+  // Weekly rate: 1 kg of body mass ≈ 7 700 kcal
+  const weeklyRateKg = Math.round((offset * 7) / 7700 * 100) / 100
+
+  return { bmi, bmiCategory, bmr, tdee, offset, targetKcal, rangeMin, rangeMax, safetyFloorApplied, weeklyRateKg }
+}

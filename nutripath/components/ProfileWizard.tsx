@@ -6,12 +6,18 @@
 
 import { useState, useEffect } from 'react'
 import TagInput from '@/components/TagInput'
-import { deriveGoals, suggestGoalsFromHistory } from '@/lib/goals'
+import { deriveGoals, suggestGoalsFromHistory, calcCaloricTarget } from '@/lib/goals'
 import type { NutrientTarget, SuggestedGoal } from '@/types/goals'
+import type { GoalIntensity } from '@/lib/goals'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Path = 'BEFORE' | 'AFTER'
+type Sex = 'MALE' | 'FEMALE' | 'OTHER'
+type ActivityLevel = 'SEDENTARY' | 'LIGHTLY_ACTIVE' | 'MODERATELY_ACTIVE' | 'VERY_ACTIVE' | 'EXTRA_ACTIVE'
+type WeightGoal = 'LOSE' | 'MAINTAIN' | 'GAIN'
+type CutIntensity  = 'MODERATE' | 'AGGRESSIVE'
+type BulkIntensity = 'LEAN' | 'STANDARD' | 'AGGRESSIVE'
 
 export interface WizardProfile {
   path: Path
@@ -29,6 +35,19 @@ export interface WizardProfile {
   takesInsulin: boolean
   hasEdHistory: boolean
   hideCalories: boolean
+  // Location
+  zipCode: string
+  country: string
+  // Body metrics
+  heightCm: string        // stored as string in form; parsed to number before save
+  weightKg: string
+  age: string
+  sex: Sex | ''
+  activityLevel: ActivityLevel | ''
+  weightGoal: WeightGoal | ''
+  /** Intensity level for cut (MODERATE/AGGRESSIVE) or bulk (LEAN/STANDARD/AGGRESSIVE). */
+  goalIntensity: GoalIntensity | ''
+  caloricGoalKcal: number | null  // user-confirmed/overridden final target
 }
 
 export interface WizardResult {
@@ -69,6 +88,38 @@ const CARE_TEAM_FLAGS = [
   { value: 'HIGH_BLOOD_PRESSURE', label: 'Your care team mentioned your blood pressure' },
 ] as const
 
+const ACTIVITY_LEVEL_OPTIONS: { value: ActivityLevel; label: string; desc: string }[] = [
+  { value: 'SEDENTARY',         label: 'Sedentary',          desc: 'Little or no exercise, desk job' },
+  { value: 'LIGHTLY_ACTIVE',    label: 'Lightly active',     desc: 'Light exercise 1–3 days/week' },
+  { value: 'MODERATELY_ACTIVE', label: 'Moderately active',  desc: 'Moderate exercise 3–5 days/week' },
+  { value: 'VERY_ACTIVE',       label: 'Very active',        desc: 'Hard exercise 6–7 days/week' },
+  { value: 'EXTRA_ACTIVE',      label: 'Extra active',       desc: 'Very hard exercise + physical job' },
+]
+
+const WEIGHT_GOAL_OPTIONS: { value: WeightGoal; label: string; desc: string }[] = [
+  { value: 'LOSE',     label: 'Lose fat',         desc: 'Create a calorie deficit to lose weight gradually and safely' },
+  { value: 'MAINTAIN', label: 'Maintain weight',  desc: 'Stay at your current weight — eat at TDEE' },
+  { value: 'GAIN',     label: 'Build muscle',     desc: 'Create a calorie surplus to support muscle gain' },
+]
+
+const CUT_INTENSITY_OPTIONS: { value: CutIntensity; label: string; pct: string; rate: string }[] = [
+  { value: 'MODERATE',   label: 'Moderate cut',   pct: '−15% of TDEE', rate: '~0.3–0.5 kg/week loss' },
+  { value: 'AGGRESSIVE', label: 'Aggressive cut',  pct: '−25% of TDEE', rate: '~0.5–0.8 kg/week loss' },
+]
+
+const BULK_INTENSITY_OPTIONS: { value: BulkIntensity; label: string; pct: string; rate: string }[] = [
+  { value: 'LEAN',       label: 'Lean bulk',       pct: '+10% of TDEE', rate: '~0.1–0.2 kg/week gain' },
+  { value: 'STANDARD',   label: 'Standard bulk',   pct: '+15% of TDEE', rate: '~0.2–0.3 kg/week gain' },
+  { value: 'AGGRESSIVE', label: 'Aggressive bulk',  pct: '+20% of TDEE', rate: '~0.3–0.4 kg/week gain' },
+]
+
+// Step layout:
+// BEFORE: 1=path  2=lifestyle  3=body-metrics  4=caloric-goal  5=allergens  6=medications  7=sensitive  8=goals  9=review
+// AFTER:  1=path  2=lifestyle  3=care-team  4=body-metrics  5=caloric-goal  6=allergens  7=medications  8=sensitive  9=goals  10=review
+function totalSteps(path: Path | null) {
+  return path === 'AFTER' ? 10 : 9
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function toggleItem<T>(arr: T[], item: T): T[] {
@@ -88,11 +139,18 @@ function targetRange(goal: NutrientTarget): string {
   return goal.unit
 }
 
-// Steps:
-// BEFORE: 1=path  2=lifestyle  3=allergens  4=medications  5=sensitive  6=goals  7=review
-// AFTER:  1=path  2=lifestyle  3=care-team  4=allergens    5=medications 6=sensitive 7=goals 8=review
-function totalSteps(path: Path | null) {
-  return path === 'AFTER' ? 8 : 7
+/** Returns true if all required body-metric fields are filled and valid */
+function metricsComplete(p: WizardProfile): boolean {
+  const h = parseFloat(p.heightCm)
+  const w = parseFloat(p.weightKg)
+  const a = parseInt(p.age, 10)
+  return (
+    !isNaN(h) && h > 0 &&
+    !isNaN(w) && w > 0 &&
+    !isNaN(a) && a >= 1 && a <= 120 &&
+    p.sex !== '' &&
+    p.activityLevel !== ''
+  )
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -182,6 +240,648 @@ function SensitiveQuestion({
   )
 }
 
+// ─── Body Metrics Step ────────────────────────────────────────────────────────
+
+function BodyMetricsStep({
+  profile,
+  stepNum,
+  onUpdate,
+  onBack,
+  onContinue,
+}: {
+  profile: WizardProfile
+  stepNum: number
+  onUpdate: (patch: Partial<WizardProfile>) => void
+  onBack: () => void
+  onContinue: () => void
+}) {
+  const [unit, setUnit] = useState<'metric' | 'imperial'>('metric')
+
+  // Imperial display state — kept in sync with profile.heightCm / profile.weightKg
+  // When switching units we derive the display values from the stored metric values.
+  const [ftRaw, setFtRaw] = useState(() => {
+    const cm = parseFloat(profile.heightCm)
+    if (!isNaN(cm)) return String(Math.floor(cm / 30.48))
+    return ''
+  })
+  const [inRaw, setInRaw] = useState(() => {
+    const cm = parseFloat(profile.heightCm)
+    if (!isNaN(cm)) return String(Math.round((cm / 2.54) % 12))
+    return ''
+  })
+  const [lbsRaw, setLbsRaw] = useState(() => {
+    const kg = parseFloat(profile.weightKg)
+    if (!isNaN(kg)) return String(Math.round(kg * 2.20462))
+    return ''
+  })
+
+  // When switching to imperial, populate display from current metric values
+  function switchToImperial() {
+    const cm = parseFloat(profile.heightCm)
+    const kg = parseFloat(profile.weightKg)
+    if (!isNaN(cm)) {
+      const totalIn = cm / 2.54
+      setFtRaw(String(Math.floor(totalIn / 12)))
+      setInRaw(String(Math.round(totalIn % 12)))
+    }
+    if (!isNaN(kg)) {
+      setLbsRaw(String(Math.round(kg * 2.20462)))
+    }
+    setUnit('imperial')
+  }
+
+  // When switching to metric, populate display from current imperial values
+  function switchToMetric() {
+    const ft = parseInt(ftRaw, 10)
+    const inches = parseInt(inRaw, 10)
+    const lbs = parseFloat(lbsRaw)
+    if (!isNaN(ft) || !isNaN(inches)) {
+      const totalIn = (isNaN(ft) ? 0 : ft) * 12 + (isNaN(inches) ? 0 : inches)
+      if (totalIn > 0) onUpdate({ heightCm: String(Math.round(totalIn * 2.54)) })
+    }
+    if (!isNaN(lbs) && lbs > 0) {
+      onUpdate({ weightKg: String(Math.round((lbs / 2.20462) * 10) / 10) })
+    }
+    setUnit('metric')
+  }
+
+  // Handle imperial height change → update metric store
+  function handleFtChange(val: string) {
+    setFtRaw(val)
+    const ft = parseInt(val, 10)
+    const inches = parseInt(inRaw, 10)
+    const totalIn = (isNaN(ft) ? 0 : ft) * 12 + (isNaN(inches) ? 0 : inches)
+    if (totalIn > 0) onUpdate({ heightCm: String(Math.round(totalIn * 2.54)) })
+    else onUpdate({ heightCm: '' })
+  }
+  function handleInChange(val: string) {
+    setInRaw(val)
+    const ft = parseInt(ftRaw, 10)
+    const inches = parseInt(val, 10)
+    const totalIn = (isNaN(ft) ? 0 : ft) * 12 + (isNaN(inches) ? 0 : inches)
+    if (totalIn > 0) onUpdate({ heightCm: String(Math.round(totalIn * 2.54)) })
+    else onUpdate({ heightCm: '' })
+  }
+  function handleLbsChange(val: string) {
+    setLbsRaw(val)
+    const lbs = parseFloat(val)
+    if (!isNaN(lbs) && lbs > 0) {
+      onUpdate({ weightKg: String(Math.round((lbs / 2.20462) * 10) / 10) })
+    } else {
+      onUpdate({ weightKg: '' })
+    }
+  }
+
+  const inputCls = 'rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500'
+
+  return (
+    <div>
+      <StepIndicator step={stepNum} path={profile.path} />
+      <h1 className="text-2xl font-bold text-gray-900">Your body metrics</h1>
+      <p className="mt-2 text-gray-500 text-sm">
+        We use these to calculate a personalised calorie target. All fields are optional —
+        skip this step if you prefer not to share.
+      </p>
+
+      {/* Unit toggle */}
+      <div className="mt-5 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+        {(['metric', 'imperial'] as const).map((u) => (
+          <button
+            key={u}
+            type="button"
+            onClick={() => u === 'metric' ? switchToMetric() : switchToImperial()}
+            className={`px-4 py-2 font-medium transition-colors ${
+              unit === u ? 'bg-green-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            {u === 'metric' ? 'Metric (kg / cm)' : 'Imperial (lb / ft)'}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-5 space-y-5">
+
+        {/* Height + Weight */}
+        {unit === 'metric' ? (
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Height (cm)</label>
+              <input
+                type="number"
+                min={50} max={272} step={0.5}
+                value={profile.heightCm}
+                onChange={(e) => onUpdate({ heightCm: e.target.value })}
+                placeholder="e.g. 170"
+                className={`w-full ${inputCls}`}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Weight (kg)</label>
+              <input
+                type="number"
+                min={20} max={500} step={0.5}
+                value={profile.weightKg}
+                onChange={(e) => onUpdate({ weightKg: e.target.value })}
+                placeholder="e.g. 70"
+                className={`w-full ${inputCls}`}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Height</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0} max={8} step={1}
+                  value={ftRaw}
+                  onChange={(e) => handleFtChange(e.target.value)}
+                  placeholder="5"
+                  className={`w-20 ${inputCls}`}
+                />
+                <span className="text-sm text-gray-500">ft</span>
+                <input
+                  type="number"
+                  min={0} max={11} step={1}
+                  value={inRaw}
+                  onChange={(e) => handleInChange(e.target.value)}
+                  placeholder="7"
+                  className={`w-20 ${inputCls}`}
+                />
+                <span className="text-sm text-gray-500">in</span>
+                {profile.heightCm && (
+                  <span className="text-xs text-gray-400">= {profile.heightCm} cm</span>
+                )}
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Weight (lbs)</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={44} max={1100} step={1}
+                  value={lbsRaw}
+                  onChange={(e) => handleLbsChange(e.target.value)}
+                  placeholder="154"
+                  className={`w-28 ${inputCls}`}
+                />
+                <span className="text-sm text-gray-500">lbs</span>
+                {profile.weightKg && (
+                  <span className="text-xs text-gray-400">= {profile.weightKg} kg</span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Age */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Age</label>
+          <input
+            type="number"
+            min={1} max={120} step={1}
+            value={profile.age}
+            onChange={(e) => onUpdate({ age: e.target.value })}
+            placeholder="e.g. 32"
+            className={`w-40 ${inputCls}`}
+          />
+        </div>
+
+        {/* Sex */}
+        <fieldset>
+          <legend className="text-sm font-medium text-gray-700 mb-2">
+            Biological sex <span className="font-normal text-gray-400">(used only for the BMR formula)</span>
+          </legend>
+          <div className="flex flex-wrap gap-4">
+            {([
+              { value: 'MALE',   label: 'Male'   },
+              { value: 'FEMALE', label: 'Female' },
+              { value: 'OTHER',  label: 'Prefer not to say / other' },
+            ] as const).map(({ value, label }) => (
+              <label key={value} className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="sex"
+                  value={value}
+                  checked={profile.sex === value}
+                  onChange={() => onUpdate({ sex: value })}
+                  className="h-4 w-4 border-gray-300 text-green-600"
+                />
+                <span className="text-sm text-gray-700">{label}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        {/* Activity level */}
+        <fieldset>
+          <legend className="text-sm font-medium text-gray-700 mb-2">Activity level</legend>
+          <div className="space-y-2">
+            {ACTIVITY_LEVEL_OPTIONS.map(({ value, label, desc }) => (
+              <label
+                key={value}
+                className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  profile.activityLevel === value ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-green-300'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="activityLevel"
+                  value={value}
+                  checked={profile.activityLevel === value}
+                  onChange={() => onUpdate({ activityLevel: value })}
+                  className="mt-0.5 h-4 w-4 border-gray-300 text-green-600"
+                />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">{label}</p>
+                  <p className="text-xs text-gray-500">{desc}</p>
+                </div>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      </div>
+
+      <p className="mt-4 text-xs text-gray-400">
+        Your measurements are stored securely and used only to personalise your calorie target.
+      </p>
+
+      <NavButtons
+        step={stepNum}
+        onBack={onBack}
+        onContinue={onContinue}
+        continueLabel={metricsComplete(profile) ? 'Calculate my goal' : 'Skip for now'}
+      />
+    </div>
+  )
+}
+
+
+// ─── Caloric Goal Step ────────────────────────────────────────────────────────
+
+// ─── BMI recommendation helpers ───────────────────────────────────────────────
+
+type BmiCategory = 'Underweight' | 'Healthy weight' | 'Overweight' | 'Obese'
+
+/** What goal makes clinical sense for each BMI category. */
+const BMI_RECOMMENDED_GOAL: Record<BmiCategory, WeightGoal> = {
+  'Underweight':    'GAIN',
+  'Healthy weight': 'MAINTAIN',
+  'Overweight':     'LOSE',
+  'Obese':          'LOSE',
+}
+
+/** Human-readable note shown next to the BMI category. */
+const BMI_GUIDANCE: Record<BmiCategory, string> = {
+  'Underweight':    'Your BMI is below 18.5. Building lean muscle or healthy weight gain is typically recommended.',
+  'Healthy weight': 'Your BMI is in the healthy range (18.5–24.9). Maintaining is a great goal.',
+  'Overweight':     'Your BMI is 25–29.9. A moderate calorie deficit can help move towards a healthier range.',
+  'Obese':          'Your BMI is ≥ 30. A supervised, gradual deficit is usually the safest approach.',
+}
+
+/** Warning shown when the user's chosen goal conflicts with their BMI. */
+function bmiConflictWarning(bmiCategory: BmiCategory, goal: WeightGoal): string | null {
+  if (bmiCategory === 'Underweight' && goal === 'LOSE') {
+    return 'Your BMI indicates you are underweight. A further calorie deficit may be unsafe — please consult a dietitian before cutting.'
+  }
+  if ((bmiCategory === 'Obese' || bmiCategory === 'Overweight') && goal === 'GAIN') {
+    return 'At your current BMI, a calorie surplus for bulking is generally not recommended without professional guidance.'
+  }
+  return null
+}
+
+function CaloricGoalStep({
+  profile,
+  stepNum,
+  onUpdate,
+  onBack,
+  onContinue,
+}: {
+  profile: WizardProfile
+  stepNum: number
+  onUpdate: (patch: Partial<WizardProfile>) => void
+  onBack: () => void
+  onContinue: () => void
+}) {
+  // If the user has an ED history, skip the calorie numbers entirely.
+  if (profile.hasEdHistory) {
+    return (
+      <div>
+        <StepIndicator step={stepNum} path={profile.path} />
+        <h1 className="text-2xl font-bold text-gray-900">Calorie goal</h1>
+        <div className="mt-6 rounded-xl border border-green-200 bg-green-50 px-5 py-5">
+          <p className="text-sm font-semibold text-green-800">We'll focus on nutrients, not numbers</p>
+          <p className="mt-2 text-sm text-green-700">
+            Because you told us about your history with disordered eating, we won't set a
+            calorie target. Your goals will focus on nourishing nutrients instead.
+          </p>
+        </div>
+        <NavButtons step={stepNum} onBack={onBack} onContinue={onContinue} continueLabel="Continue" />
+      </div>
+    )
+  }
+
+  const h = parseFloat(profile.heightCm)
+  const w = parseFloat(profile.weightKg)
+  const a = parseInt(profile.age, 10)
+
+  const sex           = profile.sex           as Sex
+  const activityLevel = profile.activityLevel as ActivityLevel
+  const weightGoal    = (profile.weightGoal   as WeightGoal) || 'MAINTAIN'
+  const goalIntensity = profile.goalIntensity as GoalIntensity | ''
+
+  // Derive the effective intensity — default if none chosen yet
+  const effectiveIntensity: GoalIntensity | undefined =
+    goalIntensity
+      ? goalIntensity
+      : weightGoal === 'LOSE' ? 'MODERATE'
+      : weightGoal === 'GAIN' ? 'STANDARD'
+      : undefined
+
+  const result = calcCaloricTarget({
+    heightCm: h, weightKg: w, age: a, sex, activityLevel, weightGoal,
+    intensity: effectiveIntensity,
+  })
+
+  // Override input state
+  const [overrideRaw, setOverrideRaw] = useState(
+    profile.caloricGoalKcal !== null ? String(profile.caloricGoalKcal) : ''
+  )
+  const overrideVal   = parseInt(overrideRaw, 10)
+  const overrideValid = !isNaN(overrideVal) && overrideVal >= 800 && overrideVal <= 10000
+
+  // Sync confirmed target to parent when any input changes
+  useEffect(() => {
+    const confirmed = overrideValid ? overrideVal : result.targetKcal
+    onUpdate({ caloricGoalKcal: confirmed, weightGoal, goalIntensity: effectiveIntensity ?? '' })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weightGoal, goalIntensity, overrideRaw, result.targetKcal])
+
+  const displayTarget = overrideValid ? overrideVal : result.targetKcal
+
+  const BMI_COLOUR =
+    result.bmiCategory === 'Healthy weight' ? 'text-green-700'
+    : result.bmiCategory === 'Underweight'  ? 'text-blue-700'
+    : result.bmiCategory === 'Overweight'   ? 'text-amber-700'
+    :                                          'text-red-700'
+
+  const BMI_BG =
+    result.bmiCategory === 'Healthy weight' ? 'bg-green-50 border-green-200'
+    : result.bmiCategory === 'Underweight'  ? 'bg-blue-50 border-blue-200'
+    : result.bmiCategory === 'Overweight'   ? 'bg-amber-50 border-amber-200'
+    :                                          'bg-red-50 border-red-200'
+
+  const recommendedGoal = BMI_RECOMMENDED_GOAL[result.bmiCategory]
+  const conflictWarning = bmiConflictWarning(result.bmiCategory, weightGoal)
+
+  // Weekly rate display
+  const weeklyRateAbs   = Math.abs(result.weeklyRateKg)
+  const weeklyRateLabel =
+    result.weeklyRateKg < 0 ? `~${weeklyRateAbs} kg/week loss`
+    : result.weeklyRateKg > 0 ? `~${weeklyRateAbs} kg/week gain`
+    : 'weight maintenance'
+
+  // Offset label for the breakdown row
+  const offsetLabel =
+    result.offset === 0
+      ? '—'
+      : result.offset < 0
+        ? `${result.offset.toLocaleString()} kcal (${Math.round(Math.abs(result.offset / result.tdee) * 100)}% deficit)`
+        : `+${result.offset.toLocaleString()} kcal (+${Math.round((result.offset / result.tdee) * 100)}% surplus)`
+
+  return (
+    <div>
+      <StepIndicator step={stepNum} path={profile.path} />
+      <h1 className="text-2xl font-bold text-gray-900">Your calorie goal</h1>
+      <p className="mt-2 text-gray-500 text-sm">
+        Based on your body metrics, we've calculated your daily calorie needs using the
+        Mifflin-St Jeor equation — the method most dietitians use today.
+      </p>
+
+      {/* ── BMI summary card ── */}
+      <div className={`mt-5 rounded-xl border px-4 py-4 ${BMI_BG}`}>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Your BMI</p>
+            <p className={`text-2xl font-bold ${BMI_COLOUR}`}>{result.bmi}</p>
+            <p className={`text-sm font-semibold ${BMI_COLOUR}`}>{result.bmiCategory}</p>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">BMR (at rest)</p>
+            <p className="text-xl font-bold text-gray-900">{result.bmr.toLocaleString()} kcal</p>
+            <p className="text-xs text-gray-400">Base metabolic rate</p>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">TDEE (with activity)</p>
+            <p className="text-xl font-bold text-gray-900">{result.tdee.toLocaleString()} kcal</p>
+            <p className="text-xs text-gray-400">Total daily expenditure</p>
+          </div>
+        </div>
+        <p className="mt-3 text-xs text-gray-600">{BMI_GUIDANCE[result.bmiCategory]}</p>
+        {result.bmiCategory !== 'Healthy weight' && (
+          <p className="mt-1 text-xs text-gray-400 italic">
+            BMI is a screening tool, not a diagnosis — it doesn't account for muscle mass or ethnicity.
+          </p>
+        )}
+      </div>
+
+      {/* ── Goal selector ── */}
+      <div className="mt-5">
+        <p className="text-sm font-medium text-gray-700 mb-1">What is your goal?</p>
+        <p className="text-xs text-gray-400 mb-3">
+          Based on your BMI, we recommend <strong>{WEIGHT_GOAL_OPTIONS.find(o => o.value === recommendedGoal)?.label}</strong>.
+        </p>
+        <div className="space-y-2">
+          {WEIGHT_GOAL_OPTIONS.map(({ value, label, desc }) => (
+            <label
+              key={value}
+              className={`flex items-start gap-3 rounded-xl border-2 p-4 cursor-pointer transition-colors ${
+                weightGoal === value ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-green-300'
+              }`}
+            >
+              <input
+                type="radio"
+                name="weightGoal"
+                value={value}
+                checked={weightGoal === value}
+                onChange={() => {
+                  // Reset intensity when switching goal type
+                  onUpdate({ weightGoal: value, goalIntensity: '' })
+                }}
+                className="mt-0.5 h-4 w-4 border-gray-300 text-green-600"
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-gray-900">{label}</p>
+                  {value === recommendedGoal && (
+                    <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+                      Recommended for you
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 mt-0.5">{desc}</p>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Conflict warning ── */}
+      {conflictWarning && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
+          <strong>Heads up:</strong> {conflictWarning}
+        </div>
+      )}
+
+      {/* ── Cut intensity sub-selector ── */}
+      {weightGoal === 'LOSE' && (
+        <div className="mt-4">
+          <p className="text-sm font-medium text-gray-700 mb-2">How aggressive is your cut?</p>
+          <div className="grid grid-cols-2 gap-2">
+            {CUT_INTENSITY_OPTIONS.map(({ value, label, pct, rate }) => (
+              <label
+                key={value}
+                className={`flex flex-col rounded-xl border-2 p-3 cursor-pointer transition-colors ${
+                  (goalIntensity || 'MODERATE') === value
+                    ? 'border-green-500 bg-green-50'
+                    : 'border-gray-200 hover:border-green-300'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="cutIntensity"
+                  value={value}
+                  checked={(goalIntensity || 'MODERATE') === value}
+                  onChange={() => onUpdate({ goalIntensity: value })}
+                  className="sr-only"
+                />
+                <p className="text-sm font-semibold text-gray-900">{label}</p>
+                <p className="text-xs text-gray-500 mt-0.5">{pct}</p>
+                <p className="text-xs text-green-700 font-medium mt-1">{rate}</p>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Bulk intensity sub-selector ── */}
+      {weightGoal === 'GAIN' && (
+        <div className="mt-4">
+          <p className="text-sm font-medium text-gray-700 mb-2">How aggressive is your bulk?</p>
+          <div className="grid grid-cols-3 gap-2">
+            {BULK_INTENSITY_OPTIONS.map(({ value, label, pct, rate }) => (
+              <label
+                key={value}
+                className={`flex flex-col rounded-xl border-2 p-3 cursor-pointer transition-colors ${
+                  (goalIntensity || 'STANDARD') === value
+                    ? 'border-green-500 bg-green-50'
+                    : 'border-gray-200 hover:border-green-300'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="bulkIntensity"
+                  value={value}
+                  checked={(goalIntensity || 'STANDARD') === value}
+                  onChange={() => onUpdate({ goalIntensity: value })}
+                  className="sr-only"
+                />
+                <p className="text-sm font-semibold text-gray-900">{label}</p>
+                <p className="text-xs text-gray-500 mt-0.5">{pct}</p>
+                <p className="text-xs text-green-700 font-medium mt-1">{rate}</p>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Live target breakdown ── */}
+      <div className="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4">
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Your calculated target</p>
+        <div className="space-y-1.5 text-sm">
+          <div className="flex justify-between">
+            <span className="text-gray-600">TDEE (maintenance)</span>
+            <span className="font-medium text-gray-900">{result.tdee.toLocaleString()} kcal</span>
+          </div>
+          {result.offset !== 0 && (
+            <div className="flex justify-between">
+              <span className="text-gray-600">{result.offset < 0 ? 'Calorie deficit' : 'Calorie surplus'}</span>
+              <span className={`font-medium ${result.offset < 0 ? 'text-orange-600' : 'text-blue-600'}`}>{offsetLabel}</span>
+            </div>
+          )}
+          <div className="border-t border-gray-200 pt-1.5 flex justify-between">
+            <span className="font-semibold text-gray-900">Daily target</span>
+            <span className="font-bold text-green-700 text-base">{displayTarget.toLocaleString()} kcal</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-400">Acceptable range (±10%)</span>
+            <span className="text-gray-500">{result.rangeMin.toLocaleString()}–{result.rangeMax.toLocaleString()} kcal</span>
+          </div>
+          {weightGoal !== 'MAINTAIN' && (
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-400">Estimated weekly change</span>
+              <span className={`font-medium ${result.weeklyRateKg < 0 ? 'text-orange-600' : 'text-blue-600'}`}>{weeklyRateLabel}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {result.safetyFloorApplied && (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+          <strong>Safety minimum applied.</strong> Your calculated target was below the safe minimum ({sex === 'MALE' ? '1,500' : '1,200'} kcal).
+          We've set it to {result.targetKcal.toLocaleString()} kcal — please speak to a dietitian if you need a lower intake.
+        </div>
+      )}
+
+      {/* ── Manual override ── */}
+      <div className="mt-4 rounded-xl border border-gray-200 p-4">
+        <p className="text-sm font-medium text-gray-700">
+          Override target <span className="font-normal text-gray-400">(optional)</span>
+        </p>
+        <p className="mt-1 text-xs text-gray-500">
+          If your dietitian or coach has given you a specific calorie target, enter it here.
+        </p>
+        <div className="mt-3 flex items-center gap-2">
+          <input
+            type="number"
+            min={800}
+            max={10000}
+            step={50}
+            value={overrideRaw}
+            onChange={(e) => setOverrideRaw(e.target.value)}
+            placeholder={String(result.targetKcal)}
+            className="w-28 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+          />
+          <span className="text-sm text-gray-500">kcal/day</span>
+          {overrideRaw && !overrideValid && (
+            <span className="text-xs text-red-500">Enter a value between 800 and 10,000</span>
+          )}
+          {overrideRaw && overrideValid && (
+            <span className="text-xs text-green-600">✓ Override applied</span>
+          )}
+        </div>
+        {overrideRaw && overrideValid && (
+          <button
+            type="button"
+            onClick={() => setOverrideRaw('')}
+            className="mt-2 text-xs text-gray-400 hover:text-red-500"
+          >
+            Remove override — use calculated {result.targetKcal.toLocaleString()} kcal
+          </button>
+        )}
+      </div>
+
+      <p className="mt-4 text-xs text-gray-400">
+        Calculations use Mifflin-St Jeor (1990). Estimates only — not medical advice.
+        Always confirm targets with your dietitian or healthcare provider.
+      </p>
+
+      <NavButtons step={stepNum} onBack={onBack} onContinue={onContinue} />
+    </div>
+  )
+}
+
 // ─── Goals step inner component ───────────────────────────────────────────────
 
 function GoalsStep({
@@ -191,6 +891,7 @@ function GoalsStep({
   setPendingGoals,
   onBack,
   onContinue,
+  stepNum,
 }: {
   path: Path
   careTeamFlags: string[]
@@ -198,6 +899,7 @@ function GoalsStep({
   setPendingGoals: React.Dispatch<React.SetStateAction<NutrientTarget[]>>
   onBack: () => void
   onContinue: () => void
+  stepNum: number
 }) {
   const [card1Text, setCard1Text] = useState('')
   const [card1Preview, setCard1Preview] = useState<NutrientTarget | null>(null)
@@ -266,8 +968,6 @@ function GoalsStep({
   function handleAddCareTeam() {
     careTeamGoals.filter((g) => ctChecked.has(goalKey(g))).forEach(addToPending)
   }
-
-  const stepNum = path === 'AFTER' ? 7 : 6
 
   return (
     <div>
@@ -471,6 +1171,16 @@ const BLANK: WizardProfile = {
   takesInsulin: false,
   hasEdHistory: false,
   hideCalories: false,
+  zipCode: '',
+  country: '',
+  heightCm: '',
+  weightKg: '',
+  age: '',
+  sex: '',
+  activityLevel: '',
+  weightGoal: '',
+  goalIntensity: '',
+  caloricGoalKcal: null,
 }
 
 export default function ProfileWizard({
@@ -493,8 +1203,8 @@ export default function ProfileWizard({
   const last = totalSteps(profile.path)
 
   // ── Step routing ─────────────────────────────────────────────────────────────
-  // BEFORE: 1=path  2=lifestyle  3=allergens  4=medications  5=sensitive  6=goals  7=review
-  // AFTER:  1=path  2=lifestyle  3=care-team  4=allergens    5=medications 6=sensitive 7=goals 8=review
+  // BEFORE: 1=path  2=lifestyle  3=body-metrics  4=caloric-goal  5=allergens  6=medications  7=sensitive  8=goals  9=review
+  // AFTER:  1=path  2=lifestyle  3=care-team  4=body-metrics  5=caloric-goal  6=allergens  7=medications  8=sensitive  9=goals  10=review
 
   function goBack() { setStep((s) => s - 1) }
   function goNext() { setStep((s) => s + 1) }
@@ -503,8 +1213,27 @@ export default function ProfileWizard({
   async function handleSave() {
     setLoading(true)
     setSaveError(null)
+
+    // Inject the caloric goal as a NutrientTarget if not hiding calories and
+    // we have a valid computed or overridden target.
+    let goalsToSave = [...pendingGoals]
+    if (!profile.hideCalories && !profile.hasEdHistory && profile.caloricGoalKcal) {
+      const calorieGoal: NutrientTarget = {
+        nutrient: 'calories',
+        targetMin: profile.caloricGoalKcal - 100,
+        targetMax: profile.caloricGoalKcal + 100,
+        unit: 'kcal',
+        label: `Calories (${profile.caloricGoalKcal.toLocaleString()} kcal/day target)`,
+        source: 'GUIDELINES',
+      }
+      // Only inject if not already set by user
+      if (!goalsToSave.some((g) => g.nutrient === 'calories')) {
+        goalsToSave = [calorieGoal, ...goalsToSave]
+      }
+    }
+
     try {
-      await onSave({ profile, goals: pendingGoals })
+      await onSave({ profile, goals: goalsToSave })
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
     } finally {
@@ -512,11 +1241,15 @@ export default function ProfileWizard({
     }
   }
 
-  // Goals step index
-  const goalsStep = isAfter ? 7 : 6
-  const reviewStep = last
+  // Step indices derived from path
+  const bodyMetricsStep   = isAfter ? 4 : 3
+  const caloricGoalStep   = isAfter ? 5 : 4
+  const allergensStep     = isAfter ? 6 : 5
+  const medicationsStep   = isAfter ? 7 : 6
+  const sensitiveStep     = isAfter ? 8 : 7
+  const goalsStep         = isAfter ? 9 : 8
+  const reviewStep        = last
 
-  // ── Allergen toggle helper ────────────────────────────────────────────────────
   function toggleAllergen(val: string) {
     update({ allergens: toggleItem(profile.allergens, val) })
   }
@@ -587,6 +1320,35 @@ export default function ProfileWizard({
             <TagInput label="What cuisines or cultural foods do you enjoy?" tags={profile.cuisines} onChange={(cuisines) => update({ cuisines })} placeholder="e.g. Caribbean, Korean, Ethiopian…" />
             <TagInput label="Any religious or ethical food guidelines?" tags={profile.religiousRules} onChange={(religiousRules) => update({ religiousRules })} placeholder="e.g. halal, kosher, vegan…" />
             <TagInput label="Any other food preferences?" tags={profile.preferences} onChange={(preferences) => update({ preferences })} placeholder="e.g. no mushrooms, prefer spicy…" />
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  ZIP / Postcode <span className="font-normal text-gray-400">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={profile.zipCode}
+                  onChange={(e) => update({ zipCode: e.target.value })}
+                  placeholder="e.g. 10001 or SW1A 1AA"
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Country <span className="font-normal text-gray-400">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={profile.country}
+                  onChange={(e) => update({ country: e.target.value.toUpperCase().slice(0, 2) })}
+                  placeholder="e.g. US, GB, CA"
+                  maxLength={2}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm uppercase focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+                />
+                <p className="mt-1 text-xs text-gray-400">2-letter country code</p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 -mt-2">Used to find nearby farmers markets and local dietitians.</p>
           </div>
           <NavButtons step={2} onBack={goBack} onContinue={goNext} />
         </div>
@@ -611,10 +1373,61 @@ export default function ProfileWizard({
         </div>
       )}
 
+      {/* Body metrics step */}
+      {step === bodyMetricsStep && (
+        <BodyMetricsStep
+          profile={profile}
+          stepNum={bodyMetricsStep}
+          onUpdate={update}
+          onBack={goBack}
+          onContinue={goNext}
+        />
+      )}
+
+      {/* Caloric goal step */}
+      {step === caloricGoalStep && (
+        metricsComplete(profile) ? (
+          <CaloricGoalStep
+            profile={profile}
+            stepNum={caloricGoalStep}
+            onUpdate={update}
+            onBack={goBack}
+            onContinue={goNext}
+          />
+        ) : (
+          // Metrics were skipped — show a brief note and move on
+          <div>
+            <StepIndicator step={caloricGoalStep} path={profile.path} />
+            <h1 className="text-2xl font-bold text-gray-900">Calorie goal</h1>
+            <div className="mt-6 rounded-xl border border-gray-200 bg-gray-50 px-5 py-5">
+              <p className="text-sm font-semibold text-gray-700">No metrics provided</p>
+              <p className="mt-2 text-sm text-gray-500">
+                You skipped the body metrics step, so we can't calculate a personalised calorie target.
+                You can always set one later from your profile, or enter one manually below.
+              </p>
+              <div className="mt-4 flex items-center gap-2">
+                <input
+                  type="number"
+                  min={800}
+                  max={10000}
+                  step={50}
+                  value={profile.caloricGoalKcal ?? ''}
+                  onChange={(e) => update({ caloricGoalKcal: e.target.value ? parseInt(e.target.value, 10) : null })}
+                  placeholder="e.g. 2000"
+                  className="w-28 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+                />
+                <span className="text-sm text-gray-500">kcal/day <span className="text-gray-400">(optional)</span></span>
+              </div>
+            </div>
+            <NavButtons step={caloricGoalStep} onBack={goBack} onContinue={goNext} />
+          </div>
+        )
+      )}
+
       {/* Allergens */}
-      {((step === 3 && !isAfter) || (step === 4 && isAfter)) && (
+      {step === allergensStep && (
         <div>
-          <StepIndicator step={isAfter ? 4 : 3} path={profile.path} />
+          <StepIndicator step={allergensStep} path={profile.path} />
           <h1 className="text-2xl font-bold text-gray-900">Do you have any food allergies?</h1>
           <div className="mt-6 space-y-3">
             {ALLERGENS.map(({ value, label }) => (
@@ -625,14 +1438,14 @@ export default function ProfileWizard({
             ))}
           </div>
           <p className="mt-4 text-xs text-gray-400">We'll make sure none of your plans or suggestions include these.</p>
-          <NavButtons step={isAfter ? 4 : 3} onBack={goBack} onContinue={goNext} />
+          <NavButtons step={allergensStep} onBack={goBack} onContinue={goNext} />
         </div>
       )}
 
       {/* Medications */}
-      {((step === 4 && !isAfter) || (step === 5 && isAfter)) && (
+      {step === medicationsStep && (
         <div>
-          <StepIndicator step={isAfter ? 5 : 4} path={profile.path} />
+          <StepIndicator step={medicationsStep} path={profile.path} />
           <h1 className="text-2xl font-bold text-gray-900">Are you taking any medications?</h1>
           <p className="mt-2 text-gray-500">This helps us flag potential food interactions. We'll always tell you to check with your pharmacist.</p>
           <div className="mt-6 space-y-6">
@@ -653,14 +1466,14 @@ export default function ProfileWizard({
               />
             </div>
           </div>
-          <NavButtons step={isAfter ? 5 : 4} onBack={goBack} onContinue={goNext} />
+          <NavButtons step={medicationsStep} onBack={goBack} onContinue={goNext} />
         </div>
       )}
 
       {/* Sensitive flags */}
-      {((step === 5 && !isAfter) || (step === 6 && isAfter)) && (
+      {step === sensitiveStep && (
         <div>
-          <StepIndicator step={isAfter ? 6 : 5} path={profile.path} />
+          <StepIndicator step={sensitiveStep} path={profile.path} />
           <h1 className="text-2xl font-bold text-gray-900">A few more details to keep you safe</h1>
           <p className="mt-2 text-gray-500">Your answers help us give you suggestions that are right for your situation.</p>
           <div className="mt-6 space-y-4">
@@ -686,7 +1499,7 @@ export default function ProfileWizard({
               </button>
             </div>
           </div>
-          <NavButtons step={isAfter ? 6 : 5} onBack={goBack} onContinue={goNext} />
+          <NavButtons step={sensitiveStep} onBack={goBack} onContinue={goNext} />
         </div>
       )}
 
@@ -699,6 +1512,7 @@ export default function ProfileWizard({
           setPendingGoals={setPendingGoals}
           onBack={goBack}
           onContinue={goNext}
+          stepNum={goalsStep}
         />
       )}
 
@@ -736,6 +1550,34 @@ export default function ProfileWizard({
               <div className="flex justify-between gap-4 px-4 py-3">
                 <dt className="font-medium text-gray-500 shrink-0">Care-team notes</dt>
                 <dd className="text-gray-900">{profile.careTeamFlags.length} selected</dd>
+              </div>
+            )}
+            {(profile.heightCm || profile.weightKg) && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">Body metrics</dt>
+                <dd className="text-gray-900 text-right">
+                  {profile.heightCm ? `${profile.heightCm} cm` : '—'} / {profile.weightKg ? `${profile.weightKg} kg` : '—'}
+                  {profile.age ? `, age ${profile.age}` : ''}
+                </dd>
+              </div>
+            )}
+            {!profile.hideCalories && !profile.hasEdHistory && profile.caloricGoalKcal && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">Calorie target</dt>
+                <dd className="text-gray-900">
+                  {profile.caloricGoalKcal.toLocaleString()} kcal/day
+                  {profile.weightGoal && (
+                    <span className="ml-1 text-xs text-gray-400">
+                      ({profile.weightGoal === 'LOSE' ? 'lose weight' : profile.weightGoal === 'GAIN' ? 'gain muscle' : 'maintain'})
+                    </span>
+                  )}
+                </dd>
+              </div>
+            )}
+            {(profile.hideCalories || profile.hasEdHistory) && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">Calorie target</dt>
+                <dd className="text-gray-500 italic text-xs">Hidden — focusing on nutrients</dd>
               </div>
             )}
             <div className="flex justify-between gap-4 px-4 py-3">

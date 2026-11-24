@@ -204,7 +204,7 @@ export default function ProfilePage() {
   async function saveProfile(section: string, patch: Partial<ProfileData>) {
     setSavingSection(section)
     setSaveError(null)
-    const updated = { ...profile, ...patch }
+    const updated: ProfileData = { ...profile, ...patch } as ProfileData
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
