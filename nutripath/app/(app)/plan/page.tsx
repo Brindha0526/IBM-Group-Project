@@ -9,6 +9,8 @@
 // A "Not medical advice" note is shown per GUIDELINES §Safety rules rule 9.
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { buildMealPrefill, saveMealPrefill } from '@/lib/meal-prefill'
 import type {
   VerifiedMealPlan,
   VerifiedDayPlan,
@@ -199,6 +201,38 @@ function SaveToGroceryButton({ meal, dayLabel }: { meal: VerifiedMeal; dayLabel:
   )
 }
 
+function LogThisMealButton({ meal, dayLabel }: { meal: VerifiedMeal; dayLabel: string }) {
+  const router = useRouter()
+  const [failed, setFailed] = useState(false)
+
+  // Only USDA-verified ingredients can be logged (POST /api/log needs an fdcId)
+  if (meal.ingredients.length === 0) return null
+
+  function handleClick() {
+    try {
+      saveMealPrefill(buildMealPrefill(meal, dayLabel))
+      router.push('/log?prefill=meal')
+    } catch {
+      setFailed(true) // sessionStorage unavailable (e.g. some private modes)
+    }
+  }
+
+  return (
+    <>
+      {failed && (
+        <span className="text-xs text-gray-500 self-center">Couldn&apos;t open the log. Try logging items from the Food Log page.</span>
+      )}
+      <button
+        type="button"
+        onClick={handleClick}
+        className="text-xs font-medium rounded px-3 py-1.5 border border-blue-600 text-blue-700 hover:bg-blue-50 transition-colors"
+      >
+        Log this meal
+      </button>
+    </>
+  )
+}
+
 function MealCard({
   meal,
   dayLabel,
@@ -285,8 +319,9 @@ function MealCard({
             </p>
           )}
 
-          {/* Save to grocery — always shown when there are any ingredients */}
-          <div className="flex justify-end">
+          {/* Actions — log the meal / save to grocery */}
+          <div className="flex flex-wrap justify-end gap-2">
+            <LogThisMealButton meal={meal} dayLabel={dayLabel} />
             <SaveToGroceryButton meal={meal} dayLabel={dayLabel} />
           </div>
         </div>
