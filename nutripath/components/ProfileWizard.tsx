@@ -140,6 +140,17 @@ function targetRange(goal: NutrientTarget): string {
 }
 
 /** Returns true if all required body-metric fields are filled and valid */
+/** e.g. "Lose weight — Moderate cut", "Maintain weight". Uses the wizard's option labels. */
+function goalWithIntensityLabel(goal: WeightGoal, intensity: GoalIntensity | ''): string {
+  const goalLabel = WEIGHT_GOAL_OPTIONS.find((o) => o.value === goal)?.label ?? goal
+  if (goal === 'MAINTAIN') return goalLabel
+  const options: { value: string; label: string }[] =
+    goal === 'LOSE' ? CUT_INTENSITY_OPTIONS : BULK_INTENSITY_OPTIONS
+  const fallback = goal === 'LOSE' ? 'MODERATE' : 'STANDARD' // same defaults as the intensity step
+  const intensityLabel = options.find((o) => o.value === (intensity || fallback))?.label
+  return intensityLabel ? `${goalLabel} — ${intensityLabel}` : goalLabel
+}
+
 function metricsComplete(p: WizardProfile): boolean {
   const h = parseFloat(p.heightCm)
   const w = parseFloat(p.weightKg)
@@ -1328,6 +1339,21 @@ export default function ProfileWizard({
   const goalsStep         = isAfter ? 9 : 8
   const reviewStep        = last
 
+  // Review-step numbers. BMI and calories are hidden when the user hides
+  // calories or disclosed ED history (GUIDELINES: never focus on weight).
+  const showBodyNumbers = !profile.hideCalories && !profile.hasEdHistory
+  const reviewCalc = metricsComplete(profile)
+    ? calcCaloricTarget({
+        heightCm: parseFloat(profile.heightCm),
+        weightKg: parseFloat(profile.weightKg),
+        age: parseInt(profile.age, 10),
+        sex: profile.sex as Sex,
+        activityLevel: profile.activityLevel as ActivityLevel,
+        weightGoal: (profile.weightGoal || 'MAINTAIN') as WeightGoal,
+        intensity: profile.goalIntensity || undefined,
+      })
+    : null
+
   function toggleAllergen(val: string) {
     update({ allergens: toggleItem(profile.allergens, val) })
   }
@@ -1645,14 +1671,29 @@ export default function ProfileWizard({
                 </dd>
               </div>
             )}
-            {!profile.hideCalories && !profile.hasEdHistory && profile.caloricGoalKcal && (
+            {showBodyNumbers && reviewCalc && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">BMI</dt>
+                <dd className="text-gray-900 text-right">
+                  {reviewCalc.bmi} <span className="text-gray-500">({reviewCalc.bmiCategory})</span>
+                  <span className="block text-xs text-gray-400">A screening tool, not a diagnosis</span>
+                </dd>
+              </div>
+            )}
+            {showBodyNumbers && profile.weightGoal && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">Goal</dt>
+                <dd className="text-gray-900 text-right">{goalWithIntensityLabel(profile.weightGoal, profile.goalIntensity)}</dd>
+              </div>
+            )}
+            {showBodyNumbers && profile.caloricGoalKcal && (
               <div className="flex justify-between gap-4 px-4 py-3">
                 <dt className="font-medium text-gray-500 shrink-0">Calorie target</dt>
-                <dd className="text-gray-900">
+                <dd className="text-gray-900 text-right">
                   {profile.caloricGoalKcal.toLocaleString()} kcal/day
-                  {profile.weightGoal && (
-                    <span className="ml-1 text-xs text-gray-400">
-                      ({profile.weightGoal === 'LOSE' ? 'lose weight' : profile.weightGoal === 'GAIN' ? 'gain muscle' : 'maintain'})
+                  {reviewCalc && reviewCalc.targetKcal !== profile.caloricGoalKcal && (
+                    <span className="block text-xs text-gray-400">
+                      Calculated: {reviewCalc.targetKcal.toLocaleString()} kcal/day (you adjusted it)
                     </span>
                   )}
                 </dd>
