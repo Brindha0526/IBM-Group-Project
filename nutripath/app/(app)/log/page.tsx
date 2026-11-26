@@ -14,7 +14,7 @@ import type { NutrientTarget } from '@/types/goals'
 import { matchAllergens } from '@/lib/safety/allergens'
 import { localDateKey, lastNDateKeys, logRangeQuery } from '@/lib/dates'
 import { loadMealPrefill, clearMealPrefill, type MealPrefill } from '@/lib/meal-prefill'
-import { nutrientTotal } from '@/lib/summary'
+import { extractCalories, nutrientTotal } from '@/lib/summary'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,13 +45,6 @@ interface ProfileData {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Find calories from the nutrient map (key contains "Energy", kcal). */
-function extractCalories(nutrients: Record<string, number>): number | null {
-  const key = Object.keys(nutrients).find(
-    (k) => k.includes('Energy') || k.toLowerCase().includes('energy')
-  )
-  return key !== undefined ? nutrients[key] : null
-}
 
 /** Total calories for the day across all logs. */
 function totalCaloriesForDay(logs: FoodLogEntry[]): number {

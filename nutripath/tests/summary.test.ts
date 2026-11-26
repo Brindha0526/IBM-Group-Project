@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   nutrientAmount,
+  extractCalories,
+  scaleNutrientSnapshot,
   nutrientTotal,
   goalStatus,
   summarizeWeek,
@@ -223,5 +225,30 @@ describe('appointment prep', () => {
     expect(text).toContain('TOPICS TO RAISE')
     expect(text).toContain('1. Follow up on what your care team mentioned about low iron')
     expect(text).toContain('FOOD LOG')
+  })
+})
+
+describe('USDA energy units (kcal vs kJ)', () => {
+  const usda = [
+    { nutrientName: 'Protein', unitName: 'G', value: 10 },
+    { nutrientName: 'Energy', unitName: 'KCAL', value: 200 },
+    { nutrientName: 'Energy', unitName: 'kJ', value: 837 },
+  ]
+
+  it('stores kJ under its own key so it cannot overwrite kcal', () => {
+    const snap = scaleNutrientSnapshot(usda, 0.5)
+    expect(snap['Energy']).toBe(100)
+    expect(snap['Energy (kJ)']).toBeCloseTo(418.5)
+    expect(snap['Protein']).toBe(5)
+  })
+
+  it('extractCalories ignores kJ keys whatever the key order', () => {
+    expect(extractCalories({ 'Energy (kJ)': 837, Energy: 200 })).toBe(200)
+    expect(extractCalories({ 'Energy (kJ)': 837 })).toBeNull()
+    expect(extractCalories({ 'Energy (Atwater General Factors)': 190 })).toBe(190)
+  })
+
+  it('nutrientAmount does not match a kJ key for an energy-like goal', () => {
+    expect(nutrientAmount({ 'Energy (kJ)': 837, Energy: 200 }, 'calories')).toBe(200)
   })
 })

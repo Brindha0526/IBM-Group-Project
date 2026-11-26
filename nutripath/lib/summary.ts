@@ -54,8 +54,37 @@ export interface WeekSummary {
 
 /** Calories from a USDA nutrient snapshot (key contains "Energy"). */
 export function extractCalories(nutrients: Record<string, number>): number | null {
-  const key = Object.keys(nutrients).find((k) => k.toLowerCase().includes('energy'))
+  const keys = Object.keys(nutrients).filter(
+    (k) => k.toLowerCase().includes('energy') && !isKilojouleKey(k)
+  )
+  // Prefer plain "Energy" (USDA 1008) over the Atwater variants
+  const key = keys.find((k) => k.trim().toLowerCase() === 'energy') ?? keys[0]
   return key !== undefined ? nutrients[key] : null
+}
+
+/** Key used for USDA energy values reported in kJ (see scaleNutrientSnapshot). */
+export function isKilojouleKey(key: string): boolean {
+  return /\(kj\)/i.test(key)
+}
+
+/**
+ * Builds the per-serving nutrient snapshot stored on a FoodLog, keyed by
+ * nutrient name. Energy in kJ is stored as "Energy (kJ)" so it can't
+ * overwrite the kcal value that shares the name "Energy".
+ */
+export function scaleNutrientSnapshot(
+  nutrients: { nutrientName: string; unitName: string; value: number }[],
+  scale: number
+): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const n of nutrients) {
+    const isKj = n.unitName.toLowerCase() === 'kj'
+    const key = isKj ? `${n.nutrientName} (kJ)` : n.nutrientName
+    // Never let a later duplicate overwrite an existing kcal Energy entry
+    if (!isKj && key in out && n.nutrientName.toLowerCase().includes('energy')) continue
+    out[key] = n.value * scale
+  }
+  return out
 }
 
 export function isCalorieNutrient(nutrient: string): boolean {
@@ -78,7 +107,7 @@ const NUTRIENT_ALIASES: Record<string, string[]> = {
 
 /** USDA keys we never want to sum (alternate units of the same nutrient). */
 function isAlternateUnitKey(key: string): boolean {
-  return key.toLowerCase().includes('international units')
+  return key.toLowerCase().includes('international units') || isKilojouleKey(key)
 }
 
 /** The amount of `nutrient` in one log's snapshot, or null if not reported. */

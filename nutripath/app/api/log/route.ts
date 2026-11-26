@@ -8,6 +8,7 @@ import { createClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
 import { getFoodDetail, searchFoods } from '@/lib/usda'
 import { runSafetyRules, matchAllergens } from '@/lib/safety'
+import { scaleNutrientSnapshot } from '@/lib/summary'
 import type { FoodInput, ProfileInput } from '@/types/safety'
 
 // ---------------------------------------------------------------------------
@@ -167,14 +168,14 @@ export async function POST(request: Request) {
   // All USDA nutrient values are per 100g — scale by servingG / 100
   const scale = servingG / 100
 
-  const scaledNutrients: Record<string, number> = {}
-  for (const n of detail.nutrients) {
-    scaledNutrients[n.nutrientName] = n.value * scale
-  }
+  // USDA reports energy twice under the same name "Energy": once in kcal and
+  // once in kJ. Keying by name alone let the kJ value (≈4.2× larger) overwrite
+  // kcal, so kJ entries get their own key and never shadow calories.
+  const scaledNutrients = scaleNutrientSnapshot(detail.nutrients, scale)
 
   // Extract calories: nutrientName contains "Energy" and unitName is "kcal"
   const energyNutrient = detail.nutrients.find(
-    (n) => n.nutrientName.includes('Energy') && n.unitName === 'kcal'
+    (n) => n.nutrientName.includes('Energy') && n.unitName.toLowerCase() === 'kcal'
   )
   const calories = energyNutrient !== undefined ? energyNutrient.value * scale : undefined
 
