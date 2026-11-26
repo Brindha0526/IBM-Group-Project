@@ -4,12 +4,14 @@
 // Profile view + edit page (post-onboarding).
 // Shows all saved profile fields and goals in collapsible sections.
 // Each section has an inline edit form. Changes save immediately via the APIs.
-// Uses the full ProfileWizard for a complete re-do if the user wants it.
+// Goals are listed here and edited on the standalone /goals page.
 
 import { useState, useEffect, useCallback } from 'react'
+import Link from 'next/link'
 import TagInput from '@/components/TagInput'
-import { deriveGoals, suggestGoalsFromHistory } from '@/lib/goals'
-import type { NutrientTarget, SuggestedGoal } from '@/types/goals'
+import { GoalList } from '@/components/GoalsEditor'
+import { customAllergens, withCustomAllergens } from '@/lib/safety/allergens'
+import type { NutrientTarget } from '@/types/goals'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,31 +61,6 @@ const CARE_TEAM_FLAGS = [
 ]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function goalKey(g: NutrientTarget) { return g.nutrient.toLowerCase() }
-
-function targetRange(goal: NutrientTarget): string {
-  if (goal.targetMin !== undefined && goal.targetMax !== undefined) return `${goal.targetMin}–${goal.targetMax} ${goal.unit}`
-  if (goal.targetMin !== undefined) return `≥ ${goal.targetMin} ${goal.unit}`
-  if (goal.targetMax !== undefined) return `≤ ${goal.targetMax} ${goal.unit}`
-  return goal.unit
-}
-
-function sourceBadge(source: NutrientTarget['source']) {
-  const map: Record<string, string> = {
-    GUIDELINES: 'bg-blue-100 text-blue-800',
-    CARE_TEAM: 'bg-purple-100 text-purple-800',
-    USER_DEFINED: 'bg-green-100 text-green-800',
-    CURATED: 'bg-amber-100 text-amber-800',
-  }
-  const labels: Record<string, string> = {
-    GUIDELINES: 'Guidelines',
-    CARE_TEAM: 'Care team',
-    USER_DEFINED: 'Your goal',
-    CURATED: 'Suggested',
-  }
-  return { cls: map[source] ?? 'bg-gray-100 text-gray-700', label: labels[source] ?? source }
-}
 
 function toggleItem<T>(arr: T[], item: T): T[] {
   return arr.includes(item) ? arr.filter((x) => x !== item) : [...arr, item]
@@ -150,21 +127,11 @@ export default function ProfilePage() {
   const [editingAllergens, setEditingAllergens] = useState(false)
   const [editingMedications, setEditingMedications] = useState(false)
   const [editingSensitive, setEditingSensitive] = useState(false)
-  const [editingGoals, setEditingGoals] = useState(false)
 
   // ── Draft state (per section) ─────────────────────────────────────────────────
   const [draft, setDraft] = useState<ProfileData | null>(null)
-  const [goalsDraft, setGoalsDraft] = useState<NutrientTarget[]>([])
   const [savingSection, setSavingSection] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
-
-  // Goals editor state
-  const [goalInput, setGoalInput] = useState('')
-  const [goalInputPreview, setGoalInputPreview] = useState<NutrientTarget | null>(null)
-  const [suggestText, setSuggestText] = useState('')
-  const [suggestions, setSuggestions] = useState<SuggestedGoal[]>([])
-  const [suggestChecked, setSuggestChecked] = useState<Set<string>>(new Set())
-  const [suggestShown, setSuggestShown] = useState(false)
 
   // ── Load data ─────────────────────────────────────────────────────────────────
 
@@ -180,7 +147,6 @@ export default function ProfilePage() {
       if (gRes.ok) {
         const { goals: g } = await gRes.json()
         setGoals(g ?? [])
-        setGoalsDraft(g ?? [])
       }
     } finally {
       setLoading(false)
@@ -188,13 +154,6 @@ export default function ProfilePage() {
   }, [])
 
   useEffect(() => { load() }, [load])
-
-  // Live preview for goal input
-  useEffect(() => {
-    if (!goalInput.trim()) { setGoalInputPreview(null); return }
-    const hits = suggestGoalsFromHistory(goalInput)
-    setGoalInputPreview(hits.length > 0 ? { ...hits[0], source: 'USER_DEFINED' } : null)
-  }, [goalInput])
 
   if (loading) return <div className="p-6 text-sm text-gray-500">Loading your profile…</div>
   if (!profile || !draft) return <div className="p-6 text-sm text-gray-500">No profile found.</div>
@@ -221,24 +180,6 @@ export default function ProfilePage() {
     }
   }
 
-  async function saveGoals(newGoals: NutrientTarget[]) {
-    setSavingSection('goals')
-    setSaveError(null)
-    try {
-      const res = await fetch('/api/goals', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ goals: newGoals }),
-      })
-      if (!res.ok) throw new Error('Failed to save goals')
-      await load()
-    } catch {
-      setSaveError('Could not save goals. Please try again.')
-    } finally {
-      setSavingSection(null)
-    }
-  }
-
   // ── Draft helpers ─────────────────────────────────────────────────────────────
 
   function updateDraft(patch: Partial<ProfileData>) {
@@ -250,49 +191,6 @@ export default function ProfilePage() {
     setSaveError(null)
     setter(false)
   }
-
-  // ── Goals draft helpers ───────────────────────────────────────────────────────
-
-  function addGoalToDraft(goal: NutrientTarget) {
-    setGoalsDraft((prev) => {
-      const key = goalKey(goal)
-      return prev.some((g) => goalKey(g) === key) ? prev : [...prev, goal]
-    })
-  }
-
-  function removeGoalFromDraft(key: string) {
-    setGoalsDraft((prev) => prev.filter((g) => goalKey(g) !== key))
-  }
-
-  function handleAddGoalInput() {
-    if (!goalInput.trim()) return
-    addGoalToDraft(
-      goalInputPreview
-        ? { ...goalInputPreview, source: 'USER_DEFINED' }
-        : { nutrient: goalInput.trim().toLowerCase(), label: goalInput.trim(), unit: '', source: 'USER_DEFINED' }
-    )
-    setGoalInput('')
-    setGoalInputPreview(null)
-  }
-
-  function handleSuggestGoals() {
-    const s = suggestGoalsFromHistory(suggestText)
-    setSuggestions(s)
-    setSuggestChecked(new Set(s.map((g) => goalKey(g))))
-    setSuggestShown(true)
-  }
-
-  function handleAddSuggested() {
-    suggestions.filter((g) => suggestChecked.has(goalKey(g))).forEach(addGoalToDraft)
-    setSuggestShown(false)
-    setSuggestions([])
-    setSuggestChecked(new Set())
-  }
-
-  // ── Care-team derived goals (AFTER path) ──────────────────────────────────────
-  const careTeamGoals = profile.path === 'AFTER'
-    ? deriveGoals({ path: 'AFTER', careTeamFlags: profile.careTeamFlags }).filter((g) => g.source === 'CARE_TEAM')
-    : []
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -425,6 +323,15 @@ export default function ProfilePage() {
                 <span className="text-sm text-gray-700">{label}</span>
               </label>
             ))}
+            <div className="pt-2">
+              <TagInput
+                label="Other allergies or intolerances"
+                hint="Type one and press Enter — e.g. mustard, kiwi, celery."
+                tags={customAllergens(draft?.allergens ?? [])}
+                onChange={(custom) => updateDraft({ allergens: withCustomAllergens(draft?.allergens ?? [], custom) })}
+                placeholder="e.g. mustard"
+              />
+            </div>
           </div>
         )}
       </EditSection>
@@ -564,132 +471,17 @@ export default function ProfilePage() {
       </EditSection>
 
       {/* ── Goals ───────────────────────────────────────────────────────────── */}
-      <EditSection
-        title="Nutrition goals"
-        editing={editingGoals}
-        onEdit={() => { setGoalsDraft(goals); setEditingGoals(true) }}
-        onCancel={() => { setGoalsDraft(goals); setSuggestShown(false); setEditingGoals(false); setSaveError(null) }}
-        onSave={async () => {
-          await saveGoals(goalsDraft)
-          setEditingGoals(false)
-        }}
-        saving={savingSection === 'goals'}
-      >
-        {!editingGoals ? (
-          goals.length > 0 ? (
-            <ul className="space-y-2">
-              {goals.map((g) => {
-                const { cls, label } = sourceBadge(g.source)
-                return (
-                  <li key={goalKey(g)} className="flex items-center justify-between gap-2 text-sm">
-                    <span className="capitalize text-gray-800">{g.label ?? g.nutrient}</span>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {(g.targetMin !== undefined || g.targetMax !== undefined) && (
-                        <span className="text-gray-500 text-xs">{targetRange(g)}</span>
-                      )}
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cls}`}>{label}</span>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          ) : (
-            <p className="text-sm text-gray-400">No goals set. Click Edit to add some.</p>
-          )
-        ) : (
-          <div className="space-y-5">
-            {/* Add a specific goal */}
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-gray-600">Add a specific goal</p>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={goalInput}
-                  onChange={(e) => setGoalInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddGoalInput()}
-                  placeholder="e.g. eat more iron-rich foods…"
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                />
-                <button type="button" onClick={handleAddGoalInput} disabled={!goalInput.trim()} className="px-3 py-2 bg-green-600 text-white text-sm rounded-lg disabled:opacity-40 hover:bg-green-700">
-                  Add
-                </button>
-              </div>
-              {goalInputPreview && (
-                <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">
-                  Maps to: {goalInputPreview.label ?? goalInputPreview.nutrient} — {targetRange(goalInputPreview)}
-                </p>
-              )}
-            </div>
-
-            {/* Suggest from context */}
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-gray-600">Suggest goals for me</p>
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
-                Suggestions come from general guidelines — <strong>not medical advice.</strong>
-              </p>
-              <textarea
-                value={suggestText}
-                onChange={(e) => setSuggestText(e.target.value)}
-                rows={2}
-                placeholder="e.g. I've been feeling tired, doctor mentioned iron…"
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-none"
-              />
-              <button type="button" onClick={handleSuggestGoals} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700">
-                Suggest goals
-              </button>
-              {suggestShown && suggestions.length > 0 && (
-                <div className="space-y-2">
-                  {suggestions.map((g) => {
-                    const key = goalKey(g)
-                    return (
-                      <label key={key} className="flex items-start gap-2 cursor-pointer bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
-                        <input type="checkbox" checked={suggestChecked.has(key)} onChange={() => setSuggestChecked((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })} className="mt-0.5 h-4 w-4 rounded text-green-600" />
-                        <div className="text-xs">
-                          <span className="font-medium capitalize">{g.label ?? g.nutrient}</span>
-                          <span className="text-gray-500 ml-1">— {targetRange(g)}</span>
-                          <p className="text-gray-400 mt-0.5">{g.reason}</p>
-                        </div>
-                      </label>
-                    )
-                  })}
-                  <button type="button" onClick={handleAddSuggested} disabled={suggestChecked.size === 0} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg disabled:opacity-40 hover:bg-green-700">
-                    Add selected
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Care-team goals (AFTER path) */}
-            {profile.path === 'AFTER' && careTeamGoals.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-gray-600">From your care team</p>
-                {careTeamGoals.map((g) => (
-                  <button key={goalKey(g)} type="button" onClick={() => addGoalToDraft(g)} className="w-full flex items-center justify-between text-xs px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 text-gray-800">
-                    <span className="capitalize">{g.label ?? g.nutrient}</span>
-                    <span className="text-gray-500">{targetRange(g)}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Current draft goals */}
-            {goalsDraft.length > 0 && (
-              <div className="space-y-1">
-                <p className="text-xs font-medium text-gray-600">Current goals ({goalsDraft.length})</p>
-                {goalsDraft.map((g) => (
-                  <div key={goalKey(g)} className="flex items-center justify-between text-xs bg-green-50 border border-green-200 rounded-lg px-3 py-2">
-                    <span className="capitalize font-medium">{g.label ?? g.nutrient}</span>
-                    <div className="flex items-center gap-2">
-                      {(g.targetMin !== undefined || g.targetMax !== undefined) && <span className="text-gray-500">{targetRange(g)}</span>}
-                      <button type="button" onClick={() => removeGoalFromDraft(goalKey(g))} className="text-gray-400 hover:text-red-500" aria-label="Remove">✕</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </EditSection>
+      <section className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 bg-gray-50 border-b border-gray-100">
+          <h2 className="text-sm font-semibold text-gray-900">Nutrition goals</h2>
+          <Link href="/goals" className="text-xs text-blue-600 hover:text-blue-800 font-medium">
+            Edit goals →
+          </Link>
+        </div>
+        <div className="px-5 py-4">
+          <GoalList goals={goals} hideCalories={profile.hideCalories || profile.hasEdHistory} />
+        </div>
+      </section>
 
       {/* Not medical advice */}
       <p className="text-xs text-gray-400 text-center pt-2 pb-6">

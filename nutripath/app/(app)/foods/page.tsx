@@ -274,7 +274,7 @@ export default function FoodsPage() {
     // Nutrient filter chips — keep foods matching ANY active nutrient filter
     if (activeNutrients.size > 0) {
       list = list.filter((f) =>
-        Array.from(activeNutrients).every((nk) => foodMatchesNutrientFilter(f, nk))
+        Array.from(activeNutrients).some((nk) => foodMatchesNutrientFilter(f, nk))
       )
     }
 

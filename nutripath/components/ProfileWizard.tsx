@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react'
 import TagInput from '@/components/TagInput'
+import { customAllergens, withCustomAllergens } from '@/lib/safety/allergens'
 import { deriveGoals, suggestGoalsFromHistory, calcCaloricTarget } from '@/lib/goals'
 import type { NutrientTarget, SuggestedGoal } from '@/types/goals'
 import type { GoalIntensity } from '@/lib/goals'
@@ -140,6 +141,17 @@ function targetRange(goal: NutrientTarget): string {
 }
 
 /** Returns true if all required body-metric fields are filled and valid */
+/** e.g. "Lose weight — Moderate cut", "Maintain weight". Uses the wizard's option labels. */
+function goalWithIntensityLabel(goal: WeightGoal, intensity: GoalIntensity | ''): string {
+  const goalLabel = WEIGHT_GOAL_OPTIONS.find((o) => o.value === goal)?.label ?? goal
+  if (goal === 'MAINTAIN') return goalLabel
+  const options: { value: string; label: string }[] =
+    goal === 'LOSE' ? CUT_INTENSITY_OPTIONS : BULK_INTENSITY_OPTIONS
+  const fallback = goal === 'LOSE' ? 'MODERATE' : 'STANDARD' // same defaults as the intensity step
+  const intensityLabel = options.find((o) => o.value === (intensity || fallback))?.label
+  return intensityLabel ? `${goalLabel} — ${intensityLabel}` : goalLabel
+}
+
 function metricsComplete(p: WizardProfile): boolean {
   const h = parseFloat(p.heightCm)
   const w = parseFloat(p.weightKg)
@@ -170,6 +182,8 @@ function NavButtons({
   continueLabel,
   continueDisabled,
   loading,
+  incomplete,
+  incompleteMessage,
 }: {
   step: number
   onBack: () => void
@@ -177,28 +191,58 @@ function NavButtons({
   continueLabel?: string
   continueDisabled?: boolean
   loading?: boolean
+  /** If set, clicking Continue shows this warning + a "Skip anyway" link before advancing */
+  incomplete?: boolean
+  incompleteMessage?: string
 }) {
+  const [warned, setWarned] = useState(false)
+
+  function handleContinue() {
+    if (incomplete && !warned) {
+      setWarned(true)
+      return
+    }
+    setWarned(false)
+    onContinue()
+  }
+
   return (
-    <div className="mt-8 flex items-center justify-between">
-      {step > 1 ? (
+    <div className="mt-8">
+      {warned && incomplete && (
+        <div className="mb-3 flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-xs text-amber-700">
+            <strong>Heads up:</strong> {incompleteMessage ?? 'Please finish this step before continuing.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => { setWarned(false); onContinue() }}
+            className="shrink-0 text-xs text-amber-600 underline hover:text-amber-800 whitespace-nowrap"
+          >
+            Skip anyway
+          </button>
+        </div>
+      )}
+      <div className="flex items-center justify-between">
+        {step > 1 ? (
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Back
+          </button>
+        ) : (
+          <span />
+        )}
         <button
           type="button"
-          onClick={onBack}
-          className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          onClick={handleContinue}
+          disabled={continueDisabled || loading}
+          className="rounded-md bg-green-600 px-5 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-40"
         >
-          Back
+          {loading ? 'Saving…' : (continueLabel ?? 'Continue')}
         </button>
-      ) : (
-        <span />
-      )}
-      <button
-        type="button"
-        onClick={onContinue}
-        disabled={continueDisabled || loading}
-        className="rounded-md bg-green-600 px-5 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-40"
-      >
-        {loading ? 'Saving…' : (continueLabel ?? 'Continue')}
-      </button>
+      </div>
     </div>
   )
 }
@@ -511,7 +555,9 @@ function BodyMetricsStep({
         step={stepNum}
         onBack={onBack}
         onContinue={onContinue}
-        continueLabel={metricsComplete(profile) ? 'Calculate my goal' : 'Skip for now'}
+        continueLabel="Continue"
+        incomplete={!metricsComplete(profile)}
+        incompleteMessage="Please fill in height, weight, age, sex, and activity level so we can calculate your calorie goal. You can skip if you'd prefer to set a target manually."
       />
     </div>
   )
@@ -1183,6 +1229,15 @@ const BLANK: WizardProfile = {
   caloricGoalKcal: null,
 }
 
+/** sessionStorage key for the first-time onboarding draft (cleared after save). */
+const DRAFT_KEY = 'nutripath_wizard_draft'
+
+interface WizardDraft {
+  step: number
+  profile: WizardProfile
+  pendingGoals: NutrientTarget[]
+}
+
 export default function ProfileWizard({
   initialProfile,
   initialGoals = [],
@@ -1194,6 +1249,38 @@ export default function ProfileWizard({
   const [pendingGoals, setPendingGoals] = useState<NutrientTarget[]>(initialGoals)
   const [loading, setLoading] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  // ── Draft persistence (first-time onboarding only) ──────────────────────────
+  // Restore after mount, not in useState initialisers: the server render has no
+  // sessionStorage, so reading it during the first render would cause a
+  // hydration mismatch. `draftRestored` keeps the save effect from overwriting
+  // a stored draft with the blank initial state before the restore has run.
+  const persistDraft = !initialProfile
+  const [draftRestored, setDraftRestored] = useState(false)
+
+  useEffect(() => {
+    if (!persistDraft) return
+    try {
+      const raw = sessionStorage.getItem(DRAFT_KEY)
+      if (raw) {
+        const draft = JSON.parse(raw) as Partial<WizardDraft>
+        const restoredProfile: WizardProfile = { ...BLANK, ...draft.profile }
+        setProfile(restoredProfile)
+        if (Array.isArray(draft.pendingGoals)) setPendingGoals(draft.pendingGoals)
+        const max = totalSteps(restoredProfile.path)
+        if (typeof draft.step === 'number' && draft.step >= 1) setStep(Math.min(draft.step, max))
+      }
+    } catch { /* corrupt or unavailable storage — start fresh */ }
+    setDraftRestored(true)
+  }, [persistDraft])
+
+  useEffect(() => {
+    if (!persistDraft || !draftRestored) return
+    try {
+      const draft: WizardDraft = { step, profile, pendingGoals }
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
+    } catch { /* storage full or private mode — persistence is best-effort */ }
+  }, [persistDraft, draftRestored, step, profile, pendingGoals])
 
   function update(patch: Partial<WizardProfile>) {
     setProfile((prev) => ({ ...prev, ...patch }))
@@ -1234,6 +1321,9 @@ export default function ProfileWizard({
 
     try {
       await onSave({ profile, goals: goalsToSave })
+      if (persistDraft) {
+        try { sessionStorage.removeItem(DRAFT_KEY) } catch { /* ignore */ }
+      }
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
     } finally {
@@ -1249,6 +1339,21 @@ export default function ProfileWizard({
   const sensitiveStep     = isAfter ? 8 : 7
   const goalsStep         = isAfter ? 9 : 8
   const reviewStep        = last
+
+  // Review-step numbers. BMI and calories are hidden when the user hides
+  // calories or disclosed ED history (GUIDELINES: never focus on weight).
+  const showBodyNumbers = !profile.hideCalories && !profile.hasEdHistory
+  const reviewCalc = metricsComplete(profile)
+    ? calcCaloricTarget({
+        heightCm: parseFloat(profile.heightCm),
+        weightKg: parseFloat(profile.weightKg),
+        age: parseInt(profile.age, 10),
+        sex: profile.sex as Sex,
+        activityLevel: profile.activityLevel as ActivityLevel,
+        weightGoal: (profile.weightGoal || 'MAINTAIN') as WeightGoal,
+        intensity: profile.goalIntensity || undefined,
+      })
+    : null
 
   function toggleAllergen(val: string) {
     update({ allergens: toggleItem(profile.allergens, val) })
@@ -1350,7 +1455,13 @@ export default function ProfileWizard({
             </div>
             <p className="text-xs text-gray-400 -mt-2">Used to find nearby farmers markets and local dietitians.</p>
           </div>
-          <NavButtons step={2} onBack={goBack} onContinue={goNext} />
+          <NavButtons
+            step={2}
+            onBack={goBack}
+            onContinue={goNext}
+            incomplete={!profile.budget || !profile.schedule}
+            incompleteMessage="Please select your food budget and cooking time before continuing."
+          />
         </div>
       )}
 
@@ -1437,7 +1548,16 @@ export default function ProfileWizard({
               </label>
             ))}
           </div>
-          <p className="mt-4 text-xs text-gray-400">We'll make sure none of your plans or suggestions include these.</p>
+          <div className="mt-5">
+            <TagInput
+              label="Any other allergies or intolerances?"
+              hint="Type one and press Enter — e.g. mustard, kiwi, celery. We'll flag foods whose names mention it."
+              tags={customAllergens(profile.allergens)}
+              onChange={(custom) => update({ allergens: withCustomAllergens(profile.allergens, custom) })}
+              placeholder="e.g. mustard"
+            />
+          </div>
+          <p className="mt-4 text-xs text-gray-400">We'll make sure none of your plans or suggestions include these. Food data doesn't always list every ingredient, so please still check labels.</p>
           <NavButtons step={allergensStep} onBack={goBack} onContinue={goNext} />
         </div>
       )}
@@ -1561,14 +1681,29 @@ export default function ProfileWizard({
                 </dd>
               </div>
             )}
-            {!profile.hideCalories && !profile.hasEdHistory && profile.caloricGoalKcal && (
+            {showBodyNumbers && reviewCalc && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">BMI</dt>
+                <dd className="text-gray-900 text-right">
+                  {reviewCalc.bmi} <span className="text-gray-500">({reviewCalc.bmiCategory})</span>
+                  <span className="block text-xs text-gray-400">A screening tool, not a diagnosis</span>
+                </dd>
+              </div>
+            )}
+            {showBodyNumbers && profile.weightGoal && (
+              <div className="flex justify-between gap-4 px-4 py-3">
+                <dt className="font-medium text-gray-500 shrink-0">Goal</dt>
+                <dd className="text-gray-900 text-right">{goalWithIntensityLabel(profile.weightGoal, profile.goalIntensity)}</dd>
+              </div>
+            )}
+            {showBodyNumbers && profile.caloricGoalKcal && (
               <div className="flex justify-between gap-4 px-4 py-3">
                 <dt className="font-medium text-gray-500 shrink-0">Calorie target</dt>
-                <dd className="text-gray-900">
+                <dd className="text-gray-900 text-right">
                   {profile.caloricGoalKcal.toLocaleString()} kcal/day
-                  {profile.weightGoal && (
-                    <span className="ml-1 text-xs text-gray-400">
-                      ({profile.weightGoal === 'LOSE' ? 'lose weight' : profile.weightGoal === 'GAIN' ? 'gain muscle' : 'maintain'})
+                  {reviewCalc && reviewCalc.targetKcal !== profile.caloricGoalKcal && (
+                    <span className="block text-xs text-gray-400">
+                      Calculated: {reviewCalc.targetKcal.toLocaleString()} kcal/day (you adjusted it)
                     </span>
                   )}
                 </dd>

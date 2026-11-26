@@ -104,3 +104,14 @@ describe('runSafetyRules (integration)', () => {
     expect(result.warnings).toHaveLength(2)
   })
 })
+
+describe('runSafetyRules for sensitive-condition profiles (meal plans)', () => {
+  it('still blocks allergens when the profile is in general-only mode', () => {
+    const result = runSafetyRules(
+      // Meal plans pass the ingredient name + USDA description as ingredients
+      { ...safeFood, name: 'Peanut butter', ingredients: ['peanut butter', 'peanut butter, smooth style'] },
+      { ...safeProfile, allergens: ['peanuts'], isPregnant: true, hasEdHistory: true }
+    )
+    expect(result.level).toBe('block')
+  })
+})

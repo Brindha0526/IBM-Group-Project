@@ -11,6 +11,10 @@ import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import type { USDAFoodSummary } from '@/types/usda'
 import type { NutrientTarget } from '@/types/goals'
+import { matchAllergens } from '@/lib/safety/allergens'
+import { localDateKey, lastNDateKeys, logRangeQuery } from '@/lib/dates'
+import { loadMealPrefill, clearMealPrefill, type MealPrefill } from '@/lib/meal-prefill'
+import { extractCalories, nutrientTotal } from '@/lib/summary'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,31 +38,13 @@ interface SavedGoal extends NutrientTarget {
 interface ProfileData {
   hideCalories: boolean
   hasEdHistory: boolean
+  allergens: string[]
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
-/** Sum a nutrient across all logged entries for the day. */
-function sumNutrient(logs: FoodLogEntry[], name: string): number {
-  return logs.reduce((acc, l) => {
-    const val = l.nutrients[name]
-    return acc + (typeof val === 'number' ? val : 0)
-  }, 0)
-}
-
-/** Find calories from the nutrient map (key contains "Energy", kcal). */
-function extractCalories(nutrients: Record<string, number>): number | null {
-  const key = Object.keys(nutrients).find(
-    (k) => k.includes('Energy') || k.toLowerCase().includes('energy')
-  )
-  return key !== undefined ? nutrients[key] : null
-}
 
 /** Total calories for the day across all logs. */
 function totalCaloriesForDay(logs: FoodLogEntry[]): number {
@@ -104,20 +90,187 @@ function ErrorCard({ message }: { message: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// "Log this meal" hand-off from the meal plan page
+// ---------------------------------------------------------------------------
+
+type PrefillStatus = 'pending' | 'logging' | 'logged' | 'error'
+
+interface PrefillRow {
+  fdcId: string
+  foodName: string
+  ingredientName: string
+  servingG: number
+  include: boolean
+  status: PrefillStatus
+  message?: string
+  warnings: string[]
+}
+
+function MealPrefillPanel({
+  prefill,
+  onItemLogged,
+  onClose,
+}: {
+  prefill: MealPrefill
+  onItemLogged: () => Promise<void> | void
+  onClose: () => void
+}) {
+  const [rows, setRows] = useState<PrefillRow[]>(() =>
+    prefill.items.map((i) => ({ ...i, include: true, status: 'pending', warnings: [] }))
+  )
+  const [running, setRunning] = useState(false)
+
+  function patchRow(idx: number, patch: Partial<PrefillRow>) {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)))
+  }
+
+  const toLog = rows.filter((r) => r.include && r.status !== 'logged' && r.servingG > 0)
+  const allDone = rows.length > 0 && rows.every((r) => !r.include || r.status === 'logged')
+
+  async function handleLogAll() {
+    setRunning(true)
+    for (let idx = 0; idx < rows.length; idx++) {
+      const r = rows[idx]
+      if (!r.include || r.status === 'logged' || r.servingG <= 0) continue
+      patchRow(idx, { status: 'logging', message: undefined, warnings: [] })
+      try {
+        const res = await fetch('/api/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fdcId: r.fdcId, foodName: r.foodName, servingG: r.servingG }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (res.ok) {
+          patchRow(idx, { status: 'logged', warnings: data.warnings ?? [] })
+        } else {
+          patchRow(idx, {
+            status: 'error',
+            message: data.error ?? 'Could not log this item',
+            warnings: data.warnings ?? [],
+          })
+        }
+      } catch {
+        patchRow(idx, { status: 'error', message: 'Network error — try again' })
+      }
+    }
+    setRunning(false)
+    await onItemLogged()
+  }
+
+  useEffect(() => {
+    if (allDone) clearMealPrefill()
+  }, [allDone])
+
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-blue-700">From your meal plan</p>
+          <h2 className="text-sm font-semibold text-gray-900">{prefill.mealName}</h2>
+          <p className="text-xs text-gray-500">Adjust the amounts to what you actually ate, then log.</p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={running}
+          className="text-xs text-gray-500 hover:text-gray-800 disabled:opacity-40"
+        >
+          {allDone ? 'Close' : 'Dismiss'}
+        </button>
+      </div>
+
+      <ul className="space-y-2">
+        {rows.map((r, idx) => (
+          <li key={`${r.fdcId}-${idx}`} className="rounded border border-gray-200 bg-white px-3 py-2 text-sm">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex min-w-0 flex-1 items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={r.include}
+                  disabled={r.status === 'logged' || running}
+                  onChange={(e) => patchRow(idx, { include: e.target.checked })}
+                  className="h-4 w-4 rounded text-blue-600"
+                />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium text-gray-900 capitalize">{r.ingredientName}</span>
+                  <span className="block truncate text-xs text-gray-500">USDA: {r.foodName}</span>
+                </span>
+              </label>
+              <label className="flex items-center gap-1 text-xs text-gray-600">
+                <input
+                  type="number"
+                  min={1}
+                  max={5000}
+                  value={r.servingG}
+                  disabled={r.status === 'logged' || running}
+                  onChange={(e) => patchRow(idx, { servingG: Number(e.target.value) })}
+                  aria-label={`Grams of ${r.ingredientName}`}
+                  className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                />
+                g
+              </label>
+              <span className="w-16 text-right text-xs">
+                {r.status === 'logging' && <span className="text-gray-500">Logging…</span>}
+                {r.status === 'logged' && <span className="text-green-700">✓ Logged</span>}
+                {r.status === 'error' && <span className="text-red-600">Not logged</span>}
+              </span>
+            </div>
+            {r.message && <p className="mt-1 text-xs text-red-600">{r.message}</p>}
+            {r.warnings.map((w, i) => (
+              <p key={i} className="mt-1 text-xs text-amber-800">⚠ {w}</p>
+            ))}
+          </li>
+        ))}
+      </ul>
+
+      {prefill.skipped.length > 0 && (
+        <div className="text-xs text-gray-600">
+          <p className="font-medium">Not pre-filled — search for these below if you ate them:</p>
+          <ul className="mt-1 list-disc pl-5">
+            {prefill.skipped.map((s, i) => (
+              <li key={i}>
+                <span className="capitalize">{s.name}</span> ({s.servingG}g) — {s.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!allDone && (
+        <button
+          type="button"
+          onClick={handleLogAll}
+          disabled={running || toLog.length === 0}
+          className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40"
+        >
+          {running ? 'Logging…' : `Log ${toLog.length} item${toLog.length === 1 ? '' : 's'}`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Tab 1 — Log food
 // ---------------------------------------------------------------------------
 
 function LogFoodTab({
   hideCalories,
+  allergens,
   onLogged,
   prefillFdcId,
   prefillName,
+  prefillMeal,
 }: {
   hideCalories: boolean
+  allergens: string[]
   onLogged: () => void
   prefillFdcId?: string
   prefillName?: string
+  /** True when arriving via "Log this meal" (/log?prefill=meal) */
+  prefillMeal?: boolean
 }) {
+  const [mealPrefill, setMealPrefill] = useState<MealPrefill | null>(null)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<USDAFoodSummary[]>([])
   const [searching, setSearching] = useState(false)
@@ -134,7 +287,7 @@ function LogFoodTab({
   const loadLogs = useCallback(async () => {
     setLogsLoading(true)
     try {
-      const res = await fetch(`/api/log?date=${todayISO()}`)
+      const res = await fetch(`/api/log?${logRangeQuery(localDateKey())}`)
       if (res.ok) {
         const data = await res.json()
         setLogs(data.logs ?? [])
@@ -143,6 +296,12 @@ function LogFoodTab({
       setLogsLoading(false)
     }
   }, [])
+
+  // Read the meal hand-off after mount (sessionStorage isn't available during SSR).
+  // It is cleared once everything is logged or the panel is dismissed.
+  useEffect(() => {
+    if (prefillMeal) setMealPrefill(loadMealPrefill())
+  }, [prefillMeal])
 
   // Pre-select food when navigated here from "Foods That Fit"
   useEffect(() => {
@@ -221,6 +380,14 @@ function LogFoodTab({
 
   return (
     <div className="space-y-6">
+      {mealPrefill && (
+        <MealPrefillPanel
+          prefill={mealPrefill}
+          onItemLogged={async () => { onLogged(); await loadLogs() }}
+          onClose={() => { clearMealPrefill(); setMealPrefill(null) }}
+        />
+      )}
+
       {/* Search box */}
       <div>
         <label htmlFor="food-search" className="block text-sm font-medium text-gray-700 mb-1">
@@ -349,6 +516,7 @@ function LogFoodTab({
 
             {logs.map((log) => {
               const kcal = extractCalories(log.nutrients)
+              const flaggedAllergens = matchAllergens(log.foodName, allergens)
               // Show a few key nutrients
               const keyNutrients: { name: string; value: number; unit: string }[] = []
               const nutrientPriority = [
@@ -367,24 +535,28 @@ function LogFoodTab({
               }
 
               return (
-                <div
-                  key={log.id}
-                  className={`grid items-start px-3 py-2 text-sm ${hideCalories ? 'grid-cols-3' : 'grid-cols-4'}`}
-                >
-                  <span className="font-medium text-gray-900 truncate pr-2">
-                    {log.foodName}
-                  </span>
-                  <span className="text-gray-600">{log.servingG}g</span>
-                  {!hideCalories && (
-                    <span className="text-gray-600">
-                      {kcal !== null ? `${Math.round(kcal)} kcal` : '—'}
+                <div key={log.id} className="px-3 py-2 text-sm">
+                  <div className={`grid items-start ${hideCalories ? 'grid-cols-3' : 'grid-cols-4'}`}>
+                    <span className="font-medium text-gray-900 truncate pr-2">
+                      {log.foodName}
                     </span>
+                    <span className="text-gray-600">{log.servingG}g</span>
+                    {!hideCalories && (
+                      <span className="text-gray-600">
+                        {kcal !== null ? `${Math.round(kcal)} kcal` : '—'}
+                      </span>
+                    )}
+                    <span className="text-gray-500 text-xs leading-5">
+                      {keyNutrients.length > 0
+                        ? keyNutrients.map((n) => `${n.name}: ${n.value.toFixed(1)}`).join(' · ')
+                        : '—'}
+                    </span>
+                  </div>
+                  {flaggedAllergens.length > 0 && (
+                    <p className="mt-1 inline-flex items-center gap-1 rounded bg-amber-50 border border-amber-200 px-2 py-0.5 text-xs text-amber-800">
+                      ⚠ May contain {flaggedAllergens.join(', ')}, which is on your allergen list
+                    </p>
                   )}
-                  <span className="text-gray-500 text-xs leading-5">
-                    {keyNutrients.length > 0
-                      ? keyNutrients.map((n) => `${n.name}: ${n.value.toFixed(1)}`).join(' · ')
-                      : '—'}
-                  </span>
                 </div>
               )
             })}
@@ -418,11 +590,12 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
   useEffect(() => {
     async function load() {
       setLoading(true)
+      const weekKeys = lastNDateKeys(7) // last 7 local days, including today
       try {
         const [goalsRes, logsRes, weekRes] = await Promise.all([
           fetch('/api/goals'),
-          fetch(`/api/log?date=${todayISO()}`),
-          fetch('/api/log?days=7'),
+          fetch(`/api/log?${logRangeQuery(localDateKey())}`),
+          fetch(`/api/log?${logRangeQuery(weekKeys[0], weekKeys[weekKeys.length - 1])}`),
         ])
         if (goalsRes.ok) {
           const d = await goalsRes.json()
@@ -438,7 +611,7 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
           // Group by day and count days where total calories < 1200
           const byDay: Record<string, FoodLogEntry[]> = {}
           for (const entry of weekLogs) {
-            const day = entry.loggedAt.slice(0, 10)
+            const day = localDateKey(new Date(entry.loggedAt)) // local day, not UTC
             if (!byDay[day]) byDay[day] = []
             byDay[day].push(entry)
           }
@@ -466,8 +639,9 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
 
   return (
     <div className="space-y-6">
-      {/* Low-intake banner — GUIDELINES §7: supportive only, never shown when hideCalories */}
-      {!hideCalories && lowIntakeDays >= 3 && (
+      {/* Low-intake banner — GUIDELINES §7: supportive only, contains no numbers,
+          so it is shown even when calories are hidden (incl. ED history). */}
+      {lowIntakeDays >= 3 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           It looks like your intake has been low for a few days. If you&apos;re struggling,
           please reach out to your care team or a support line.
@@ -485,19 +659,8 @@ function CheckInTab({ hideCalories }: { hideCalories: boolean }) {
             Nutrient totals from USDA FoodData Central
           </p>
           {visibleGoals.map((goal) => {
-            const nutrientKey = goal.nutrient
-            // Try to match by exact key or by partial match
-            let total = 0
-            const exactMatch = Object.entries(
-              logs.reduce((acc, l) => {
-                for (const [k, v] of Object.entries(l.nutrients)) {
-                  acc[k] = (acc[k] ?? 0) + v
-                }
-                return acc
-              }, {} as Record<string, number>)
-            ).find(([k]) => k.toLowerCase().includes(nutrientKey.toLowerCase()))
-            if (exactMatch) total = exactMatch[1]
-            else total = sumNutrient(logs, nutrientKey)
+            // Shared matcher: handles USDA naming (e.g. "Vitamin B-12", "Fatty acids, total saturated")
+            const total = nutrientTotal(logs, goal.nutrient) ?? 0
 
             const target = goal.targetMin ?? goal.targetMax ?? null
             const hasMax = goal.targetMax !== undefined && goal.targetMax !== null
@@ -542,6 +705,7 @@ function LogPageInner() {
   const searchParams = useSearchParams()
   const prefillFdcId = searchParams.get('fdcId') ?? undefined
   const prefillName = searchParams.get('name') ?? undefined
+  const prefillMeal = searchParams.get('prefill') === 'meal'
 
   const [tab, setTab] = useState<'log' | 'checkin'>('log')
   const [profile, setProfile] = useState<ProfileData | null>(null)
@@ -555,13 +719,16 @@ function LogPageInner() {
           setProfile({
             hideCalories: d.profile.hideCalories ?? false,
             hasEdHistory: d.profile.hasEdHistory ?? false,
+            allergens: Array.isArray(d.profile.allergens) ? d.profile.allergens : [],
           })
         }
       })
       .catch(() => {/* no-op — profile may not exist yet */})
   }, [])
 
-  const hideCalories = profile?.hideCalories ?? false
+  // Hide calories if the user set the toggle OR disclosed an ED history
+  const hideCalories = (profile?.hideCalories ?? false) || (profile?.hasEdHistory ?? false)
+  const allergens = profile?.allergens ?? []
 
   function handleLogged() {
     // Bump the check-in tab so its data refreshes when user switches to it
@@ -603,9 +770,11 @@ function LogPageInner() {
       {tab === 'log' && (
         <LogFoodTab
           hideCalories={hideCalories}
+          allergens={allergens}
           onLogged={handleLogged}
           prefillFdcId={prefillFdcId}
           prefillName={prefillName}
+          prefillMeal={prefillMeal}
         />
       )}
       {tab === 'checkin' && (

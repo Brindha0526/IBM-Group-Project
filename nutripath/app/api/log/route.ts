@@ -7,7 +7,8 @@ import { z } from 'zod'
 import { createClient } from '@/lib/supabase/server'
 import { prisma } from '@/lib/prisma'
 import { getFoodDetail, searchFoods } from '@/lib/usda'
-import { runSafetyRules } from '@/lib/safety'
+import { runSafetyRules, matchAllergens } from '@/lib/safety'
+import { scaleNutrientSnapshot } from '@/lib/summary'
 import type { FoodInput, ProfileInput } from '@/types/safety'
 
 // ---------------------------------------------------------------------------
@@ -30,9 +31,21 @@ async function getAuthenticatedUser() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/log?date=YYYY-MM-DD  — logs for a single day (default: today)
-// GET /api/log?days=N           — logs for the last N days
+// GET /api/log?start=ISO&end=ISO — logs in [start, end). Preferred: the client
+//                                   computes local-midnight boundaries (lib/dates.ts)
+//                                   so day cutoffs follow the user's timezone.
+// GET /api/log?date=YYYY-MM-DD    — fallback; day in the SERVER's timezone
+// GET /api/log?days=N             — fallback; last N days, server timezone
 // ---------------------------------------------------------------------------
+
+const MAX_RANGE_MS = 92 * 24 * 60 * 60 * 1000
+
+const RangeSchema = z
+  .object({
+    start: z.string().datetime({ offset: true }).transform((v) => new Date(v)),
+    end: z.string().datetime({ offset: true }).transform((v) => new Date(v)),
+  })
+  .refine(({ start, end }) => end > start && end.getTime() - start.getTime() <= MAX_RANGE_MS)
 
 export async function GET(request: Request) {
   const user = await getAuthenticatedUser()
@@ -43,10 +56,21 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const daysParam = searchParams.get('days')
   const dateParam = searchParams.get('date')
+  const startParam = searchParams.get('start')
+  const endParam = searchParams.get('end')
 
   let where: { userId: string; loggedAt: { gte: Date; lt?: Date } }
 
-  if (daysParam) {
+  if (startParam || endParam) {
+    const parsed = RangeSchema.safeParse({ start: startParam, end: endParam })
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'start and end must both be ISO timestamps, end after start, at most 92 days apart' },
+        { status: 400 }
+      )
+    }
+    where = { userId: user.id, loggedAt: { gte: parsed.data.start, lt: parsed.data.end } }
+  } else if (daysParam) {
     const days = parseInt(daysParam, 10)
     if (isNaN(days) || days < 1) {
       return NextResponse.json({ error: 'Invalid days param' }, { status: 400 })
@@ -56,12 +80,17 @@ export async function GET(request: Request) {
     since.setHours(0, 0, 0, 0)
     where = { userId: user.id, loggedAt: { gte: since } }
   } else {
-    // Default to today (or the specified date)
-    const targetDate = dateParam ? new Date(dateParam) : new Date()
-    // If dateParam parsing fails, fall back to today
-    const dateToUse = isNaN(targetDate.getTime()) ? new Date() : targetDate
-    const start = new Date(dateToUse)
-    start.setHours(0, 0, 0, 0)
+    // Fallback: interpret YYYY-MM-DD in the server's timezone. (new Date("YYYY-MM-DD")
+    // would parse as UTC midnight.) Clients should send start/end instead so the
+    // cutoff follows the user's local timezone.
+    let start: Date
+    if (dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+      const [y, mo, d] = dateParam.split('-').map(Number)
+      start = new Date(y, mo - 1, d, 0, 0, 0, 0)
+    } else {
+      start = new Date()
+      start.setHours(0, 0, 0, 0)
+    }
     const end = new Date(start)
     end.setDate(end.getDate() + 1)
     where = { userId: user.id, loggedAt: { gte: start, lt: end } }
@@ -139,14 +168,14 @@ export async function POST(request: Request) {
   // All USDA nutrient values are per 100g — scale by servingG / 100
   const scale = servingG / 100
 
-  const scaledNutrients: Record<string, number> = {}
-  for (const n of detail.nutrients) {
-    scaledNutrients[n.nutrientName] = n.value * scale
-  }
+  // USDA reports energy twice under the same name "Energy": once in kcal and
+  // once in kJ. Keying by name alone let the kJ value (≈4.2× larger) overwrite
+  // kcal, so kJ entries get their own key and never shadow calories.
+  const scaledNutrients = scaleNutrientSnapshot(detail.nutrients, scale)
 
   // Extract calories: nutrientName contains "Energy" and unitName is "kcal"
   const energyNutrient = detail.nutrients.find(
-    (n) => n.nutrientName.includes('Energy') && n.unitName === 'kcal'
+    (n) => n.nutrientName.includes('Energy') && n.unitName.toLowerCase() === 'kcal'
   )
   const calories = energyNutrient !== undefined ? energyNutrient.value * scale : undefined
 
@@ -171,6 +200,18 @@ export async function POST(request: Request) {
 
   // 7. Run safety rules
   const result = runSafetyRules(foodInput, profileInput)
+
+  // 7b. Allergen check on the food name. USDA SR Legacy / Foundation foods have
+  //     no ingredient list, so checkAllergens above can't see them. The log
+  //     records what the user already ate, so a match is a warning (shown on
+  //     the log row), not a block. Blocking still applies to meal-plan suggestions.
+  const nameAllergens = matchAllergens(foodName, profileInput.allergens)
+  if (nameAllergens.length > 0) {
+    result.warnings.push(
+      `${foodName} may contain ${nameAllergens.join(', ')}, which is on your allergen list.`
+    )
+    if (result.level === 'ok') result.level = 'warn'
+  }
 
   // 8. Block if safety level is 'block'
   if (result.level === 'block') {

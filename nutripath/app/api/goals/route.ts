@@ -17,7 +17,7 @@ const NutrientTargetSchema = z.object({
   nutrient: z.string().min(1),
   targetMin: z.number().optional().nullable(),
   targetMax: z.number().optional().nullable(),
-  unit: z.string().min(1),
+  unit: z.string(), // may be '' for free-text goals with no measurable target
   label: z.string().optional().nullable(),
   source: GoalSourceEnum,
 })

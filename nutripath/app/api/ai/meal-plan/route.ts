@@ -106,8 +106,7 @@ function sumNutrients(list: IngredientNutrients[]): IngredientNutrients {
 
 async function verifyIngredient(
   ing: RawIngredient,
-  profileInput: ProfileInput,
-  safetyMode: 'full' | 'general-only'
+  profileInput: ProfileInput
 ): Promise<{ verified: VerifiedIngredient | null; unverified: UnverifiedIngredient | null }> {
   // 1. USDA search
   const results = await searchFoods(ing.name)
@@ -137,13 +136,19 @@ async function verifyIngredient(
     fdcId: detail.fdcId,
     name: detail.description,
     // Parse ingredient text from USDA if available
-    ingredients: detail.ingredients
-      ? detail.ingredients
-          .toLowerCase()
-          .split(/[,;]/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [ing.name.toLowerCase()],
+    // Always include the ingredient name and the USDA description so allergens
+    // are caught even when USDA has no ingredient list (SR Legacy / Foundation).
+    ingredients: [
+      ing.name.toLowerCase(),
+      detail.description.toLowerCase(),
+      ...(detail.ingredients
+        ? detail.ingredients
+            .toLowerCase()
+            .split(/[,;]/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : []),
+    ],
     calories: extractNutrient(
       detail.nutrients.map((n) => ({ nutrientId: n.nutrientId, value: n.value })),
       NUTRIENT_IDS.energy
@@ -153,10 +158,10 @@ async function verifyIngredient(
     ),
   }
 
-  // 4. Run safety rules
-  const safetyResult = safetyMode === 'general-only'
-    ? { level: 'warn' as const, warnings: [] }
-    : runSafetyRules(foodInput, profileInput)
+  // 4. Run safety rules. These run for every user: general-only mode limits
+  //    how tailored the advice is, never the allergen/medication protections
+  //    (GUIDELINES rule 3: allergens are blocked from ALL plans).
+  const safetyResult = runSafetyRules(foodInput, profileInput)
 
   if (safetyResult.level === 'block') {
     // Blocked ingredients are dropped
@@ -195,12 +200,11 @@ async function verifyIngredient(
 
 async function verifyMeal(
   meal: RawMeal,
-  profileInput: ProfileInput,
-  safetyMode: 'full' | 'general-only'
+  profileInput: ProfileInput
 ): Promise<VerifiedMeal> {
   // Verify all ingredients in parallel
   const results = await Promise.all(
-    meal.ingredients.map((ing) => verifyIngredient(ing, profileInput, safetyMode))
+    meal.ingredients.map((ing) => verifyIngredient(ing, profileInput))
   )
 
   const verified: VerifiedIngredient[] = results
@@ -323,10 +327,8 @@ export async function POST(request: Request) {
     hasEdHistory:    dbProfile.hasEdHistory,
   }
 
-  // Sensitive condition check → general-only mode
+  // Sensitive condition check → general-only mode (surfaced as a warning on the plan)
   const sensitiveCheck = checkSensitiveConditions(profileInput)
-  const safetyMode: 'full' | 'general-only' =
-    sensitiveCheck.level !== 'ok' ? 'general-only' : 'full'
 
   // 6. AI → USDA → Safety pipeline with up to 2 retries
   const MAX_RETRIES = 2
@@ -346,7 +348,7 @@ export async function POST(request: Request) {
     const dayResults: VerifiedDayPlan[] = await Promise.all(
       rawPlan.days.map(async (rawDay) => {
         const meals = await Promise.all(
-          rawDay.meals.map((meal) => verifyMeal(meal, profileInput, safetyMode))
+          rawDay.meals.map((meal) => verifyMeal(meal, profileInput))
         )
         const dayTotals = sumNutrients(meals.map((m) => m.totals))
         return { dayLabel: rawDay.dayLabel, meals, dayTotals }
